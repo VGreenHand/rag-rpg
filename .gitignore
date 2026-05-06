@@ -1,0 +1,39 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ChromaDB - generated vector database (run ingest_initial.py to rebuild)
+chroma_db/
+
+# Sentence-transformers model cache
+.sentence_transformers_cache/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
