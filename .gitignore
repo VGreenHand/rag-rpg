@@ -28,6 +28,12 @@ desktop.ini
 # ChromaDB - generated vector database (run ingest_initial.py to rebuild)
 chroma_db/
 
+# Dialogue TXT files - generated at runtime
+dialogues/
+
+# Batch ingest file - generated at runtime
+new_batch.txt
+
 # Sentence-transformers model cache
 .sentence_transformers_cache/
 

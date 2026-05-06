@@ -1,0 +1,12 @@
+{
+    "display_name": "RAG-RPG 记忆引擎",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "",
+    "author": "VGreenHand",
+    "version": "1.0.0",
+    "homePage": "https://github.com/VGreenHand/rag-rpg",
+    "auto_update": false
+}
