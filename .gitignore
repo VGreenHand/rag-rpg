@@ -12,6 +12,7 @@ venv/
 env/
 .venv/
 .env
+test_env/
 
 # IDE & editor
 .vscode/
