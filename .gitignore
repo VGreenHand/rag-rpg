@@ -47,3 +47,6 @@ new_batch.txt
 # Temporary files
 *.tmp
 *.bak
+
+# Environment consistency report
+environment_report.json
