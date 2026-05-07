@@ -1,6 +1,6 @@
 """
 对话处理管道：接收原始对话 → 清洗 → 提取关键信息 → 写入TXT → 向量入库
-v2.0: 超时保护 + 断点续执行 + 降级策略
+v3.0: 记忆去重 + 智能压缩 + 技能熟练度覆盖更新
 """
 import re
 import uuid
@@ -17,6 +17,8 @@ from sentence_transformers import SentenceTransformer
 from config import (
     CHROMA_PATH, COLLECTION_DIALOGUE, COLLECTION_SKILLS,
     MODEL_NAME, DIALOGUE_DIR, BATCH_FILE, COLLECTION_MEMORY,
+    DEDUP_SIMILARITY_THRESHOLD, SUMMARY_MAX_CHARS,
+    SKILL_PROFICIENCY_PATTERN,
 )
 from checkpoint_manager import get_checkpoint, TimeoutError as CkpTimeoutError
 
@@ -44,7 +46,7 @@ class SafeTimer:
         t.start()
         t.join(timeout=timeout)
         if t.is_alive():
-            raise CkpTimeoutError(f"操作超时 ({timeout}s): {getattr(func, '__name__', str(func))}")
+            raise CkpTimeoutError(f"操作超时 ({timeout}s)")
         if exc_holder:
             raise exc_holder[0]
         return result_holder[0] if result_holder else None
@@ -56,6 +58,10 @@ class DialoguePipeline:
         self.client = chromadb.PersistentClient(path=CHROMA_PATH)
         self.dialogue_col = self.client.get_or_create_collection(
             name=COLLECTION_DIALOGUE,
+            metadata={"hnsw:space": "cosine"}
+        )
+        self.skill_col = self.client.get_or_create_collection(
+            name=COLLECTION_SKILLS,
             metadata={"hnsw:space": "cosine"}
         )
         self._known_terms: Optional[list] = None
@@ -74,6 +80,8 @@ class DialoguePipeline:
             except Exception:
                 pass
 
+    # ─── 文本清洗 ────────────────────────────────
+
     def _clean_text(self, text: str) -> str:
         if not text or not text.strip():
             return ""
@@ -84,6 +92,50 @@ class DialoguePipeline:
         text = re.sub(r'[ \t]{2,}', ' ', text)
         text = re.sub(r'^\s*[-–—]\s*', '', text, flags=re.MULTILINE)
         return text.strip()
+
+    # ─── 功能1: 智能摘要 ──────────────────────────
+
+    def _summarize_text(self, text: str) -> str:
+        if len(text) <= SUMMARY_MAX_CHARS:
+            return text
+        sentences = re.split(r'(?<=[。！？])', text)
+        kept = []
+        current_len = 0
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            if current_len + len(s) > SUMMARY_MAX_CHARS:
+                break
+            kept.append(s)
+            current_len += len(s)
+        result = "".join(kept)
+        if len(result) < len(text) * 0.3:
+            return text[:SUMMARY_MAX_CHARS]
+        return result
+
+    # ─── 功能1: 记忆去重 ──────────────────────────
+
+    def _is_duplicate(self, text_embedding: list[float],
+                      threshold: float = DEDUP_SIMILARITY_THRESHOLD) -> bool:
+        try:
+            results = SafeTimer.run(
+                lambda: self.dialogue_col.query(
+                    query_embeddings=[text_embedding],
+                    n_results=1
+                ),
+                CHROMA_TIMEOUT
+            )
+            if results and results["distances"] and results["distances"][0]:
+                min_dist = results["distances"][0][0]
+                similarity = 1.0 - min_dist
+                if similarity >= threshold:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    # ─── 关键术语提取 ─────────────────────────────
 
     def _extract_key_terms(self, text: str) -> list[str]:
         if not text:
@@ -137,6 +189,62 @@ class DialoguePipeline:
         with self._terms_lock:
             self._known_terms = None
 
+    # ─── 功能2: 技能熟练度检测与覆盖更新 ────────────
+
+    def _detect_skill_proficiency(self, text: str,
+                                  key_terms: list[str]) -> Optional[dict]:
+        match = re.search(SKILL_PROFICIENCY_PATTERN, text)
+        if not match:
+            return None
+        proficiency = int(match.group(1))
+        entry_key = None
+        for term in key_terms:
+            try:
+                col = self.skill_col
+                results = col.get(where={"entry_key": term})
+                if results["ids"]:
+                    entry_key = term
+                    break
+            except Exception:
+                continue
+        if not entry_key:
+            return None
+        return {"entry_key": entry_key, "proficiency": proficiency}
+
+    def _update_skill_proficiency(self, entry_key: str,
+                                  proficiency: int) -> bool:
+        try:
+            results = self.skill_col.get(where={"entry_key": entry_key})
+            if not results["ids"]:
+                return False
+            old_id = results["ids"][0]
+            old_doc = results["documents"][0]
+            old_meta = results["metadatas"][0]
+            new_doc = re.sub(
+                SKILL_PROFICIENCY_PATTERN,
+                f"熟练度 {proficiency}/100",
+                old_doc
+            )
+            new_emb = SafeTimer.run(
+                self.model.encode, EMBED_TIMEOUT, new_doc
+            ).tolist()
+            SafeTimer.run(
+                lambda: self.skill_col.update(
+                    ids=[old_id],
+                    documents=[new_doc],
+                    embeddings=[new_emb]
+                ),
+                CHROMA_TIMEOUT
+            )
+            logger.info(f"熟练度更新: {entry_key} → {proficiency}/100")
+            self.invalidate_terms_cache()
+            return True
+        except Exception as e:
+            logger.error(f"熟练度更新失败: {e}")
+            return False
+
+    # ─── TXT写入 ─────────────────────────────────
+
     def _write_txt(self, speaker: str, name: str, content: str,
                    turn: int, key_terms: list[str]) -> str:
         today = datetime.now().strftime("%Y-%m-%d")
@@ -176,11 +284,18 @@ class DialoguePipeline:
                     pass
         return str(BATCH_FILE)
 
+    # ─── 向量入库（含去重检查） ────────────────────
+
     def _embed_and_store(self, clean_text: str, speaker: str,
-                         name: str, turn: int, key_terms: list[str]) -> str:
+                         name: str, turn: int, key_terms: list[str]) -> dict:
         embedding = SafeTimer.run(
             self.model.encode, EMBED_TIMEOUT, clean_text
         ).tolist()
+
+        duplicate = self._is_duplicate(embedding)
+        if duplicate:
+            logger.info(f"去重跳过 Turn#{turn} (相似度>{DEDUP_SIMILARITY_THRESHOLD})")
+            return {"doc_id": "duplicate_skipped", "duplicate": True}
 
         doc_id = str(uuid.uuid4())
 
@@ -199,7 +314,9 @@ class DialoguePipeline:
                 ids=[doc_id]
             )
         SafeTimer.run(_add, CHROMA_TIMEOUT)
-        return doc_id
+        return {"doc_id": doc_id, "duplicate": False}
+
+    # ─── 核心处理流程 ─────────────────────────────
 
     def process_turn(self, speaker: str, name: str, content: str,
                      turn: int) -> dict:
@@ -210,10 +327,23 @@ class DialoguePipeline:
         except Exception:
             clean_text = content[:500]
 
+        clean_text = self._summarize_text(clean_text)
+
         if clean_text:
             key_terms = self._extract_key_terms(clean_text)
         else:
             key_terms = []
+
+        skill_update = self._detect_skill_proficiency(clean_text, key_terms)
+        if skill_update:
+            self._update_skill_proficiency(
+                skill_update["entry_key"],
+                skill_update["proficiency"]
+            )
+            self._report(
+                f"熟练度更新: {skill_update['entry_key']} "
+                f"→ {skill_update['proficiency']}/100"
+            )
 
         txt_path = ""
         try:
@@ -223,35 +353,43 @@ class DialoguePipeline:
         except Exception as e:
             logger.error(f"TXT写入失败 Turn#{turn}: {e}")
 
-        doc_id = ""
+        store_result = {"doc_id": "", "duplicate": False}
         try:
-            doc_id = self._embed_and_store(clean_text, speaker, name, turn, key_terms)
+            store_result = self._embed_and_store(
+                clean_text, speaker, name, turn, key_terms
+            )
         except CkpTimeoutError:
             logger.error(f"向量入库超时 Turn#{turn}")
-            doc_id = f"timeout_{uuid.uuid4().hex[:8]}"
         except Exception as e:
             logger.error(f"向量入库失败 Turn#{turn}: {e}")
-            doc_id = f"error_{uuid.uuid4().hex[:8]}"
 
         try:
-            if key_terms:
+            if key_terms and not store_result.get("duplicate"):
                 self._generate_batch_file(clean_text, key_terms)
         except Exception:
             pass
 
+        status = "ok"
+        if store_result.get("duplicate"):
+            status = "duplicate_skipped"
+        elif not store_result.get("doc_id"):
+            status = "store_failed"
+
         self._report(
             f"Turn#{turn} | {speaker} | "
-            f"clean={len(clean_text)} terms={len(key_terms)}"
+            f"clean={len(clean_text)} terms={len(key_terms)} "
+            f"status={status}"
         )
 
         return {
-            "status": "ok",
-            "doc_id": doc_id,
+            "status": status,
+            "doc_id": store_result.get("doc_id", ""),
             "txt_path": txt_path,
             "cleaned_length": len(clean_text),
             "raw_length": raw_len,
             "key_terms_found": key_terms,
             "turn": turn,
+            "skill_updated": bool(skill_update),
         }
 
     # ─── 断点续执行的批处理 ─────────────────────
@@ -282,7 +420,7 @@ class DialoguePipeline:
         if resume and cp.can_resume():
             progress = cp.get_progress()
             start_idx = progress["stats"]["total_processed"]
-            self._report(f"断点续执行: 从 #{start_idx} 开始，共 {len(chunks)} 条")
+            self._report(f"断点续执行: 从 #{start_idx} 开始")
         else:
             step_defs = [
                 {"id": f"batch_{i}", "name": f"入库条目 #{i}"}
@@ -338,9 +476,7 @@ class DialoguePipeline:
                 for j in range(i, batch_end):
                     cp.mark_step_success(j)
                 succeeded += len(batch_chunks)
-                self._report(
-                    f"批量入库 {i+1}-{batch_end}/{len(chunks)} 完成"
-                )
+                self._report(f"批量入库 {i+1}-{batch_end}/{len(chunks)} 完成")
             except CkpTimeoutError:
                 for j in range(i, batch_end):
                     cp.mark_step_failed(j, "ChromaDB写入超时")

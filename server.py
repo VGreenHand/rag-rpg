@@ -211,6 +211,7 @@ async def query_dialogue(
         "constraint_text": "",
         "total_hits": search_results["total_hits"],
         "degraded": search_results.get("degraded", False),
+        "active_constraints": [],
     }
 
     if req.generate_constraint and search_results["results"]:
@@ -220,6 +221,7 @@ async def query_dialogue(
             dialogue_context=req.context,
         )
         response["constraint_text"] = constraint
+        response["active_constraints"] = ce.get_active_constraints()
 
     return response
 
@@ -340,6 +342,17 @@ async def submit_feedback(
         "status": "ok",
         "entry_type": req.entry_type,
         "new_weight": ce.get_weight(req.entry_type),
+    }
+
+
+@app.get("/api/constraints/current")
+async def get_current_constraints(_: str = Depends(verify_api_key)):
+    """获取当前生效的剧情约束（供 UI 展示）"""
+    ce = get_constraint_engine()
+    return {
+        "active_constraints": ce.get_active_constraints(),
+        "display_text": ce.get_display_text(),
+        "count": len(ce.get_active_constraints()),
     }
 
 

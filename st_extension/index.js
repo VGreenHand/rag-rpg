@@ -1,13 +1,10 @@
 /**
- * RAG-RPG 记忆引擎 - SillyTavern 扩展
+ * RAG-RPG 记忆引擎 - SillyTavern 扩展 v2.0
  * 功能：
  *   1. 自动捕获每轮对话并发送至 Python 后端处理
  *   2. AI 生成前自动查询向量库获取剧情约束
  *   3. 将约束文本注入系统提示词，实现记忆驱动的剧情引导
- *
- * 安装方式：将 st_extension 文件夹复制到 SillyTavern 的
- *   data/default-user/extensions/ 目录下，重命名为 RAG-RPG
- * 然后重启 SillyTavern 并在扩展面板中启用。
+ *   4. 在聊天界面中浮动展示当前生效的剧情约束
  */
 
 import { eventSource, event_types } from '../../../../script.js';
@@ -23,10 +20,46 @@ const defaultSettings = {
     auto_ingest: true,
     auto_query: true,
     inject_constraints: true,
+    show_constraints_panel: true,
     query_turns: 6,
     max_results: 3,
     debug_mode: false,
 };
+
+// ─── HTML 模板 ─────────────────────────────────────────────
+
+function getPanelHtml() {
+    return `
+    <div id="rag-rpg-panel" style="
+        position: fixed; bottom: 60px; right: 10px; width: 320px;
+        max-height: 280px; overflow-y: auto; z-index: 9999;
+        background: rgba(20, 20, 30, 0.92); border: 1px solid #4a4a6a;
+        border-radius: 8px; padding: 10px; font-size: 12px;
+        color: #d0d0e0; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        font-family: 'Segoe UI', sans-serif;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;
+            border-bottom:1px solid #3a3a5a;padding-bottom:6px;">
+            <span style="font-weight:bold;color:#8ab4f8;">RAG-RPG 约束</span>
+            <span id="rag-rpg-close-btn" style="cursor:pointer;color:#888;"
+                title="关闭">✕</span>
+        </div>
+        <div id="rag-rpg-constraints-list">
+            <div style="color:#666;text-align:center;padding:10px 0;">
+                暂无约束（进行对话后自动更新）
+            </div>
+        </div>
+        <div style="margin-top:6px;border-top:1px solid #3a3a5a;padding-top:4px;
+            display:flex;gap:6px;">
+            <button id="rag-rpg-refresh-btn" style="flex:1;background:#2a2a4a;
+                border:1px solid #4a4a6a;color:#aac;border-radius:4px;padding:3px 8px;
+                cursor:pointer;font-size:11px;">刷新</button>
+            <span style="color:#555;font-size:10px;align-self:center;">
+                ⚡约束注入中</span>
+        </div>
+    </div>`;
+}
+
+// ─── 加载/保存设置 ─────────────────────────────────────────
 
 function loadSettings() {
     if (!extension_settings[EXTENSION_NAME]) {
@@ -52,6 +85,8 @@ function log(...args) {
         console.log(`[${EXTENSION_NAME}]`, ...args);
     }
 }
+
+// ─── API 调用 ──────────────────────────────────────────────
 
 async function callApi(endpoint, data) {
     const settings = getSettings();
@@ -84,6 +119,75 @@ async function callApi(endpoint, data) {
     }
 }
 
+async function callApiGet(endpoint) {
+    const settings = getSettings();
+    try {
+        const response = await fetch(`${settings.api_url}${endpoint}`, {
+            method: 'GET',
+            headers: {
+                'X-API-Key': settings.api_key,
+            },
+        });
+        if (!response.ok) return null;
+        return await response.json();
+    } catch (error) {
+        return null;
+    }
+}
+
+// ─── 约束面板展示 ─────────────────────────────────────────
+
+function updateConstraintsPanel(result) {
+    const panel = document.getElementById('rag-rpg-panel');
+    const list = document.getElementById('rag-rpg-constraints-list');
+    if (!panel || !list) return;
+
+    const constraints = result?.active_constraints || [];
+    const totalHits = result?.total_hits || 0;
+
+    if (constraints.length === 0) {
+        list.innerHTML = `<div style="color:#666;text-align:center;padding:8px 0;">
+            ${totalHits > 0 ? `查找到 ${totalHits} 条记忆` : '暂无约束'}
+        </div>`;
+        return;
+    }
+
+    const typeLabels = {
+        skill: '⚔️ 技能', mechanic: '🔧 机制',
+        setting: '🌍 设定', plot: '📜 剧情',
+        dialogue: '💬 记忆',
+    };
+
+    list.innerHTML = constraints.map(c => {
+        const label = typeLabels[c.type] || `📌 ${c.type}`;
+        return `<div style="padding:4px 0;border-bottom:1px solid #2a2a3a;">
+            <div style="font-size:11px;color:#8ab4f8;">${label}
+                <span style="color:#666;margin-left:6px;">
+                    相关度:${c.score.toFixed(2)}</span>
+            </div>
+            <div style="color:#bbb;font-size:11px;padding:2px 0 0 10px;">
+                ${c.content.length > 80 ? c.content.substring(0, 80) + '...' : c.content}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function refreshConstraintsPanel() {
+    const result = await callApiGet('/api/constraints/current');
+    if (result) {
+        updateConstraintsPanel(result);
+    }
+}
+
+function togglePanel(show) {
+    const panel = document.getElementById('rag-rpg-panel');
+    if (panel) {
+        panel.style.display = show ? 'block' : 'none';
+    }
+}
+
+// ─── 事件处理 ──────────────────────────────────────────────
+
 let turnCounter = 0;
 let lastProcessedMessage = '';
 
@@ -106,7 +210,7 @@ async function handleMessageReceived() {
     const speaker = message.is_user ? 'user' : 'ai';
     const name = String(message.name || (speaker === 'user' ? '用户' : 'AI'));
 
-    log(`捕获对话 Turn#${turnCounter} | ${speaker} | ${name} | ${mes.substring(0, 40)}...`);
+    log(`捕获对话 Turn#${turnCounter} | ${speaker} | ${name}`);
 
     await callApi('/api/dialogue/ingest', {
         speaker: speaker,
@@ -139,12 +243,19 @@ async function handleGenerationBefore() {
         generate_constraint: settings.inject_constraints,
     });
 
-    if (result && result.constraint_text) {
-        log(`已注入剧情约束 (${result.total_hits} 条命中)`);
-        context.setExtensionPrompt(EXTENSION_NAME, result.constraint_text);
-    } else if (result && result.formatted) {
-        log(`已注入检索记忆 (${result.total_hits} 条命中)`);
-        context.setExtensionPrompt(EXTENSION_NAME, result.formatted);
+    if (result) {
+        log(`查询完成: ${result.total_hits} 条命中`);
+
+        if (settings.show_constraints_panel && result.active_constraints) {
+            updateConstraintsPanel(result);
+            togglePanel(true);
+        }
+
+        if (result.constraint_text) {
+            context.setExtensionPrompt(EXTENSION_NAME, result.constraint_text);
+        } else if (result.formatted) {
+            context.setExtensionPrompt(EXTENSION_NAME, result.formatted);
+        }
     }
 }
 
@@ -152,15 +263,27 @@ async function onChatChanged() {
     turnCounter = 0;
     lastProcessedMessage = '';
     log('对话已切换，计数器重置');
+    togglePanel(false);
 }
+
+// ─── 初始化 ────────────────────────────────────────────────
 
 jQuery(async () => {
     loadSettings();
 
+    // 注入面板 HTML
+    const panelHtml = getPanelHtml();
+    $('body').append(panelHtml);
+
+    // 绑定面板事件
+    $(document).on('click', '#rag-rpg-close-btn', () => togglePanel(false));
+    $(document).on('click', '#rag-rpg-refresh-btn', refreshConstraintsPanel);
+
+    // 绑定 SillyTavern 事件
     eventSource.on(event_types.MESSAGE_RECEIVED, handleMessageReceived);
     eventSource.on(event_types.MESSAGE_SENT, handleMessageReceived);
     eventSource.on(event_types.GENERATION_BEFORE_COMMANDS, handleGenerationBefore);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
 
-    console.log(`[${EXTENSION_NAME}] 扩展已加载 → ${getSettings().api_url}`);
+    console.log(`[${EXTENSION_NAME}] v2.0 已加载 → ${getSettings().api_url}`);
 });

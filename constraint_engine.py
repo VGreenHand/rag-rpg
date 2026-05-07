@@ -26,15 +26,19 @@ class ConstraintEngine:
             "plot": 1.2,
             "dialogue": 0.7,
         }
+        self._last_constraints: list[dict] = []
 
     def generate_constraints(self, search_results: dict,
                              dialogue_context: list[dict]) -> str:
         """根据检索结果生成剧情约束指令字符串"""
         results = search_results.get("results", [])
         if not results:
+            self._last_constraints = []
             return ""
 
         active = []
+        self._last_constraints = []
+
         for r in results:
             if len(active) >= MAX_ACTIVE_CONSTRAINTS:
                 break
@@ -44,8 +48,15 @@ class ConstraintEngine:
             constraint = self._build_constraint(r, dialogue_context)
             if constraint:
                 active.append(constraint)
+                self._last_constraints.append({
+                    "type": r.get("metadata", {}).get("type", "info"),
+                    "content": r.get("document", "")[:120],
+                    "score": r.get("score", 0.0),
+                    "display": constraint,
+                })
 
         if not active:
+            self._last_constraints = []
             return ""
 
         last_turn = dialogue_context[-1] if dialogue_context else {}
@@ -152,6 +163,19 @@ class ConstraintEngine:
 
     def get_weight(self, entry_type: str) -> float:
         return self._feedback_weights.get(entry_type, 1.0)
+
+    def get_active_constraints(self) -> list[dict]:
+        return list(self._last_constraints)
+
+    def get_display_text(self) -> str:
+        if not self._last_constraints:
+            return ""
+        lines = ["━━ 当前剧情约束 ━━"]
+        for c in self._last_constraints:
+            tname = {"skill": "技能", "mechanic": "机制", "setting": "设定",
+                     "plot": "剧情", "dialogue": "记忆"}.get(c["type"], c["type"])
+            lines.append(f"  [{tname} 相关度:{c['score']:.2f}] {c['content'][:60]}...")
+        return "\n".join(lines)
 
 
 COLLECTION_NAME_MAP = {
