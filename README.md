@@ -100,30 +100,58 @@ SillyTavern (浏览器/客户端)
 | 网络 | embedding 模型首次下载需联网 | 宽带连接 |
 | SillyTavern | 无版本依赖 | 最新稳定版 |
 
+## 终端环境适配说明
+
+本教程提供 **Windows CMD（命令提示符）** 的完整命令。如果你使用其他终端，请注意以下区别：
+
+| 操作 | Windows CMD | Windows PowerShell | Linux / macOS bash |
+|------|-------------|-------------------|--------------------|
+| 打开方式 | `Win+R` → 输入 `cmd` | `Win` → 搜索 PowerShell | 打开 Terminal |
+| 路径分隔符 | `\`（反斜杠） | `\` 或 `/` | `/`（正斜杠） |
+| 行续接符 | `^` | `` ` ``（反引号） | `\`（反斜杠） |
+| 粘贴操作 | 鼠标右键点击窗口 | `Ctrl+V` | `Ctrl+Shift+V` |
+| 中断程序 | `Ctrl+C` | `Ctrl+C` | `Ctrl+C` |
+| Python 路径 | `python` | `python` | `python3` |
+| conda 激活 | `conda activate rag-rpg` | `conda activate rag-rpg` | `conda activate rag-rpg` |
+
+> **当前环境**：本教程所有命令基于 Windows CMD。如果你使用 PowerShell 或 Linux/Mac，只需注意路径分隔符和行续接符的差异即可。
+
 ---
 
 ## 安装步骤
 
 ### 第一步：克隆项目
 
-```powershell
+打开命令提示符（按 `Win+R`，输入 `cmd`，回车），执行：
+
+```cmd
 git clone https://github.com/VGreenHand/rag-rpg.git
 cd rag-rpg
 ```
 
-### 第二步：创建虚拟环境
+> **预期结果**：项目文件下载到 `D:\Study\Project\rag-rpg\` 目录下。
 
-```powershell
-python -m venv venv
-.\venv\Scripts\activate     # Windows
-# source venv/bin/activate  # Linux/macOS
+### 第二步：使用 Conda 创建 Python 环境
+
+```cmd
+conda create -n rag-rpg python=3.12 -y
 ```
+
+> **预期结果**：显示 `done` 字样，环境创建完成。
+
+```cmd
+conda activate rag-rpg
+```
+
+> **预期结果**：命令行行首出现 `(rag-rpg)` 标识，表示环境已激活。
 
 ### 第三步：安装依赖
 
-```powershell
+```cmd
 pip install -r requirements.txt
 ```
+
+> **预期结果**：所有依赖包下载安装完成，显示 `Successfully installed ...`。
 
 依赖清单：
 - `chromadb>=0.4.0` — 向量数据库
@@ -134,21 +162,21 @@ pip install -r requirements.txt
 
 ### 第四步：初始化向量库
 
-```powershell
-python scripts/ingest_initial.py
+```cmd
+python scripts\ingest_initial.py
 ```
 
-这将从 `data/CharacterInfo/Characterdesign.json` 中读取角色技能和世界观条目，生成向量并存入 ChromaDB。
+> **预期结果**：显示 `成功入库 10 条记忆！` 等字样。
 
 首次运行会自动下载 embedding 模型 `shibing624/text2vec-base-chinese`（约 400 MB）。
 
 ### 第五步：启动服务端
 
-```powershell
+```cmd
 python server.py
 ```
 
-服务将在 `http://127.0.0.1:8765` 启动。
+> **预期结果**：显示 `服务已就绪 → http://127.0.0.1:8765`。
 
 ### 第六步：安装 SillyTavern 扩展
 
@@ -163,14 +191,11 @@ python server.py
 
 ### 第七步：验证安装
 
-```powershell
+```cmd
 python -c "import sys; sys.path.insert(0,'.'); from pipeline import get_pipeline; p=get_pipeline(); print('Pipeline:', p.get_stats())"
 ```
 
-预期输出类似：
-```
-Pipeline: {'dialogue_memory': 0, 'character_skills': 10, 'my_rag_memory': 0, 'dialogue_txt_files': 0}
-```
+> **预期结果**：显示类似 `{'dialogue_memory': 0, 'character_skills': 10, ...}` 的输出。
 
 ---
 
@@ -223,15 +248,15 @@ SillyTavern 扩展触发 → POST /api/dialogue/query
 
 所有脚本位于 `scripts/` 目录下：
 
-| 脚本 | 用途 | 用法示例 |
+| 脚本 | 用途 | CMD 用法示例 |
 |------|------|----------|
-| `check_env.py` | 检查 Python 环境与依赖 | `python scripts/check_env.py` |
-| `ingest_initial.py` | 从 JSON 初始化向量库 | `python scripts/ingest_initial.py` |
+| `check_env.py` | 检查 Python 环境与依赖 | `python scripts\check_env.py` |
+| `ingest_initial.py` | 从 JSON 初始化向量库 | `python scripts\ingest_initial.py` |
 | `ingest_new.py` | 从 `[TYPE]` 标记 TXT 追加导入 | 编辑 `new_batch.txt` 后执行 |
-| `quick_search.py` | 交互式语义检索 | `python scripts/quick_search.py` |
+| `quick_search.py` | 交互式语义检索 | `python scripts\quick_search.py` |
 | `update_skill.py` | 更新指定技能条目 | 修改 entry_key 和内容后执行 |
-| `check_keys.py` | 验证 JSON 与向量库一致性 | `python scripts/check_keys.py` |
-| `check_metadata.py` | 查看所有条目的 entry_key | `python scripts/check_metadata.py` |
+| `check_keys.py` | 验证 JSON 与向量库一致性 | `python scripts\check_keys.py` |
+| `check_metadata.py` | 查看所有条目的 entry_key | `python scripts\check_metadata.py` |
 
 ### 批量导入格式
 
@@ -245,21 +270,21 @@ SillyTavern 扩展触发 → POST /api/dialogue/query
 
 然后执行：
 
-```powershell
-python scripts/ingest_new.py
+```cmd
+python scripts\ingest_new.py
 ```
 
 ### 断点续执行
 
 当批量导入因故中断后（如进程崩溃），恢复执行：
 
-```powershell
+```cmd
 curl -X POST http://127.0.0.1:8765/api/checkpoint/resume -H "X-API-Key: rag-rpg-local"
 ```
 
 查询断点状态：
 
-```powershell
+```cmd
 curl http://127.0.0.1:8765/api/checkpoint/status -H "X-API-Key: rag-rpg-local"
 ```
 
@@ -267,12 +292,14 @@ curl http://127.0.0.1:8765/api/checkpoint/status -H "X-API-Key: rag-rpg-local"
 
 在 SillyTavern 中完成战斗后，更新技能熟练度：
 
-```powershell
+```cmd
 curl -X POST http://127.0.0.1:8765/api/skill/update ^
   -H "X-API-Key: rag-rpg-local" ^
   -H "Content-Type: application/json" ^
   -d "{\"entry_key\": \"skill_lightsaber_mastery\", \"new_content\": \"技能：光剑精通。当前熟练度 25/100。[type:skill]\"}"
 ```
+
+> **说明**：CMD 中使用 `^` 作为行续接符。如果整行复制，可以将命令写成一行去掉 `^`。
 
 ### 扩展面板设置
 
@@ -355,16 +382,16 @@ rag-rpg/
 
 ### 全面功能测试
 
-```powershell
-python tests/test_suite.py
+```cmd
+python tests\test_suite.py
 ```
 
 148 条测试，覆盖：环境检查、配置验证、管道清洗/入库/提取、查询引擎多策略检索、约束引擎模板生成/冷却/反馈权重、FastAPI 全端点测试、兼容性测试（英文/中英混合/超长文本/JSON序列化）、性能基准测试。
 
 ### 断点续执行专项测试
 
-```powershell
-python tests/test_checkpoint_resume.py
+```cmd
+python tests\test_checkpoint_resume.py
 ```
 
 75 条测试，覆盖：checkpoint 持久化/加载、续点执行全流程、超时保护、心跳监控、SafeTimer 安全执行、管道安全操作、查询引擎降级模式、断点 API 端点测试、并发执行压力测试。
@@ -380,11 +407,17 @@ python tests/test_checkpoint_resume.py
 | 服务启动报错 `chromadb` 未安装 | 依赖未安装 | `pip install -r requirements.txt` |
 | SillyTavern 扩展不生效 | 扩展目录错误 | 检查扩展路径是否正确 |
 | `ingest_initial.py` 找不到 JSON | 路径变化 | 确认目标路径: `data/CharacterInfo/Characterdesign.json` |
-| 查询返回空结果 | 向量库未初始化 | 先执行 `python scripts/ingest_initial.py` |
+| 查询返回空结果 | 向量库未初始化 | 先执行 `python scripts\ingest_initial.py` |
 | 出现 `invalid api key` | API Key 不匹配 | 确认 SillyTavern 扩展设置中的 API Key 与 config.py 一致 |
 | embedding 模型下载失败 | 网络问题 | 确保网络畅通，可尝试设置 `HF_TOKEN` |
 | 测试卡死在 `init_task` | 旧版 checkpoint 残留 | `python -c "import shutil; shutil.rmtree('.checkpoints', ignore_errors=True)"` |
-| `process_batch_txt` 部分失败 | ChromaDB 写入超时 | 检查磁盘负载，可减小 `batch_size` |
+| `process_batch_txt` 部分失败 | ChromaDB 写入超时 | 检查磁盘负载 |
+
+> **💡 CMD 使用提示**：
+> - 按 `Win+R`，输入 `cmd`，回车即可打开命令提示符
+> - 粘贴命令：鼠标右键点击窗口（不要按 Ctrl+V）
+> - 复制输出：选中文字后按回车
+> - 中断运行中程序：按 `Ctrl+C`
 
 ### 日志查看
 
