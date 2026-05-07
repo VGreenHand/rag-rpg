@@ -9,7 +9,7 @@ import re
 import os
 
 # ==================== 配置区（按需修改） ====================
-JSON_FILE = "CharacterInfo/Characterdesign.json"  # 角色设定 JSON 文件
+JSON_FILE = "data/CharacterInfo/Characterdesign.json"  # 角色设定 JSON 文件
 COLLECTION_NAME = "character_skills"      # Chroma 集合名称
 MODEL_NAME = "shibing624/text2vec-base-chinese"
 # ===========================================================

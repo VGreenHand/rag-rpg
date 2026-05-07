@@ -29,6 +29,9 @@ desktop.ini
 # ChromaDB - generated vector database (run ingest_initial.py to rebuild)
 chroma_db/
 
+# Checkpoint state files - generated at runtime
+.checkpoints/
+
 # Dialogue TXT files - generated at runtime
 dialogues/
 

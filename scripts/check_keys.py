@@ -6,7 +6,7 @@ import chromadb
 
 # ==================== 配置区 ====================
 COLLECTION_NAME = "character_skills"
-JSON_FILE = "CharacterInfo/Characterdesign.json"
+JSON_FILE = "data/CharacterInfo/Characterdesign.json"
 # ===============================================
 
 # 1. 读取 Characterdesign.json

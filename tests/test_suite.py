@@ -18,7 +18,7 @@ from datetime import datetime
 os.environ["RAG_RPG_API_KEY"] = "rag-rpg-local"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TOTAL_TESTS = 0
 PASSED = 0
