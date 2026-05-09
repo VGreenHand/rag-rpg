@@ -14,6 +14,7 @@ from config import (
     CHROMA_PATH, MODEL_NAME, COLLECTION_SKILLS,
     COLLECTION_DIALOGUE, COLLECTION_MEMORY,
     MAX_CONTEXT_TURNS, TOP_K_RESULTS, MIN_RELEVANCE,
+    get_chroma_path, DEFAULT_PROFILE,
 )
 from checkpoint_manager import TimeoutError as CkpTimeoutError
 
@@ -47,9 +48,10 @@ class SafeTimer:
 
 
 class QueryEngine:
-    def __init__(self):
+    def __init__(self, profile: str = DEFAULT_PROFILE):
+        self._profile = profile
         self.model = SentenceTransformer(MODEL_NAME)
-        self.client = chromadb.PersistentClient(path=CHROMA_PATH)
+        self.client = chromadb.PersistentClient(path=get_chroma_path(profile))
         self._collections: dict[str, object] = {}
         self._stats: dict[str, int] = {"timeouts": 0, "degraded": 0, "errors": 0}
 
@@ -249,11 +251,10 @@ class QueryEngine:
         }
 
 
-_query_engine_instance: Optional[QueryEngine] = None
+_query_engine_instances: dict[str, QueryEngine] = {}
 
 
-def get_query_engine() -> QueryEngine:
-    global _query_engine_instance
-    if _query_engine_instance is None:
-        _query_engine_instance = QueryEngine()
-    return _query_engine_instance
+def get_query_engine(profile: str = DEFAULT_PROFILE) -> QueryEngine:
+    if profile not in _query_engine_instances:
+        _query_engine_instances[profile] = QueryEngine(profile)
+    return _query_engine_instances[profile]

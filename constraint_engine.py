@@ -9,7 +9,7 @@ from typing import Optional
 
 from config import (
     MAX_CONSTRAINT_CHARS, MAX_ACTIVE_CONSTRAINTS,
-    CONSTRAINT_COOLDOWN_TURNS,
+    CONSTRAINT_COOLDOWN_TURNS, DEFAULT_PROFILE,
 )
 
 
@@ -27,6 +27,7 @@ class ConstraintEngine:
             "dialogue": 0.7,
         }
         self._last_constraints: list[dict] = []
+        self._last_constraint_text: str = ""
 
     def generate_constraints(self, search_results: dict,
                              dialogue_context: list[dict]) -> str:
@@ -34,6 +35,7 @@ class ConstraintEngine:
         results = search_results.get("results", [])
         if not results:
             self._last_constraints = []
+            self._last_constraint_text = ""
             return ""
 
         active = []
@@ -57,6 +59,7 @@ class ConstraintEngine:
 
         if not active:
             self._last_constraints = []
+            self._last_constraint_text = ""
             return ""
 
         last_turn = dialogue_context[-1] if dialogue_context else {}
@@ -73,7 +76,8 @@ class ConstraintEngine:
         if len(full) > MAX_CONSTRAINT_CHARS:
             full = full[:MAX_CONSTRAINT_CHARS - 20] + "\n[约束已截断]"
 
-        return full.strip()
+        self._last_constraint_text = full.strip()
+        return self._last_constraint_text
 
     def _build_constraint(self, result: dict,
                           dialogue_context: list[dict]) -> Optional[str]:
@@ -184,11 +188,10 @@ COLLECTION_NAME_MAP = {
     "dialogue_memory": "dialogue",
 }
 
-_constraint_engine_instance: Optional[ConstraintEngine] = None
+_constraint_engine_instances: dict[str, ConstraintEngine] = {}
 
 
-def get_constraint_engine() -> ConstraintEngine:
-    global _constraint_engine_instance
-    if _constraint_engine_instance is None:
-        _constraint_engine_instance = ConstraintEngine()
-    return _constraint_engine_instance
+def get_constraint_engine(profile: str = DEFAULT_PROFILE) -> ConstraintEngine:
+    if profile not in _constraint_engine_instances:
+        _constraint_engine_instances[profile] = ConstraintEngine()
+    return _constraint_engine_instances[profile]

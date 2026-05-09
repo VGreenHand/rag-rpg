@@ -19,6 +19,7 @@ from config import (
     MODEL_NAME, DIALOGUE_DIR, BATCH_FILE, COLLECTION_MEMORY,
     DEDUP_SIMILARITY_THRESHOLD, SUMMARY_MAX_CHARS,
     SKILL_PROFICIENCY_PATTERN,
+    get_chroma_path, get_dialogue_dir, get_batch_file, DEFAULT_PROFILE,
 )
 from checkpoint_manager import get_checkpoint, TimeoutError as CkpTimeoutError
 
@@ -53,9 +54,10 @@ class SafeTimer:
 
 
 class DialoguePipeline:
-    def __init__(self):
+    def __init__(self, profile: str = DEFAULT_PROFILE):
+        self._profile = profile
         self.model = SentenceTransformer(MODEL_NAME)
-        self.client = chromadb.PersistentClient(path=CHROMA_PATH)
+        self.client = chromadb.PersistentClient(path=get_chroma_path(profile))
         self.dialogue_col = self.client.get_or_create_collection(
             name=COLLECTION_DIALOGUE,
             metadata={"hnsw:space": "cosine"}
@@ -248,8 +250,9 @@ class DialoguePipeline:
     def _write_txt(self, speaker: str, name: str, content: str,
                    turn: int, key_terms: list[str]) -> str:
         today = datetime.now().strftime("%Y-%m-%d")
-        DIALOGUE_DIR.mkdir(parents=True, exist_ok=True)
-        filepath = DIALOGUE_DIR / f"dialogue_{today}.txt"
+        dialogue_dir = get_dialogue_dir(self._profile)
+        dialogue_dir.mkdir(parents=True, exist_ok=True)
+        filepath = dialogue_dir / f"dialogue_{today}.txt"
 
         timestamp = datetime.now().strftime("%H:%M:%S")
         role_tag = "USER" if speaker == "user" else "AI"
@@ -276,13 +279,14 @@ class DialoguePipeline:
                 line = f"[{tag.upper()}] 对话提及: {term} | {content[:100]}\n"
 
                 def _append():
-                    with open(BATCH_FILE, "a", encoding="utf-8") as f:
+                    batch_file = get_batch_file(self._profile)
+                    with open(batch_file, "a", encoding="utf-8") as f:
                         f.write(line)
                 try:
                     SafeTimer.run(_append, FILE_IO_TIMEOUT)
                 except CkpTimeoutError:
                     pass
-        return str(BATCH_FILE)
+        return str(get_batch_file(self._profile))
 
     # ─── 向量入库（含去重检查） ────────────────────
 
@@ -396,7 +400,7 @@ class DialoguePipeline:
 
     def process_batch_txt(self, file_path: str = None,
                           resume: bool = False) -> dict:
-        src = file_path or str(BATCH_FILE)
+        src = file_path or str(get_batch_file(self._profile))
         if not os.path.exists(src):
             return {"status": "empty", "message": f"文件 {src} 不存在"}
 
@@ -416,7 +420,7 @@ class DialoguePipeline:
         if not chunks:
             return {"status": "empty", "message": "文件无有效条目"}
 
-        cp = get_checkpoint()
+        cp = get_checkpoint(self._profile)
         if resume and cp.can_resume():
             progress = cp.get_progress()
             start_idx = progress["stats"]["total_processed"]
@@ -515,18 +519,18 @@ class DialoguePipeline:
                 stats[col_name] = col.count()
             except Exception:
                 stats[col_name] = 0
+        dialogue_dir = get_dialogue_dir(self._profile)
         dialogue_files = (
-            list(DIALOGUE_DIR.glob("*.txt")) if DIALOGUE_DIR.exists() else []
+            list(dialogue_dir.glob("*.txt")) if dialogue_dir.exists() else []
         )
         stats["dialogue_txt_files"] = len(dialogue_files)
         return stats
 
 
-_pipeline_instance: Optional[DialoguePipeline] = None
+_pipeline_instances: dict[str, DialoguePipeline] = {}
 
 
-def get_pipeline() -> DialoguePipeline:
-    global _pipeline_instance
-    if _pipeline_instance is None:
-        _pipeline_instance = DialoguePipeline()
-    return _pipeline_instance
+def get_pipeline(profile: str = DEFAULT_PROFILE) -> DialoguePipeline:
+    if profile not in _pipeline_instances:
+        _pipeline_instances[profile] = DialoguePipeline(profile)
+    return _pipeline_instances[profile]

@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from config import API_HOST, API_PORT, API_KEY
+from config import API_HOST, API_PORT, API_KEY, DEFAULT_PROFILE
 from pipeline import get_pipeline
 from query_engine import get_query_engine
 from constraint_engine import get_constraint_engine
@@ -71,16 +71,20 @@ def verify_api_key(x_api_key: str = Header(default="")):
     return x_api_key
 
 
+def get_profile(x_game_profile: str = Header(default=DEFAULT_PROFILE)):
+    return x_game_profile
+
+
 # ─── 生命周期 ───────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("正在初始化 RAG-RPG 记忆引擎 v2.0 ...")
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(DEFAULT_PROFILE)
     stats = pipeline.get_stats()
     logger.info(f"向量库状态: {stats}")
 
-    cp = get_checkpoint()
+    cp = get_checkpoint(DEFAULT_PROFILE)
     if cp.can_resume():
         progress = cp.get_progress()
         logger.warning(
@@ -88,7 +92,6 @@ async def lifespan(app: FastAPI):
             f"(进度: {progress['current_step']}/{progress['total_steps']})"
         )
 
-    cp._start_heartbeat()
     logger.info(f"服务已就绪 → http://{API_HOST}:{API_PORT}")
     yield
     cp._stop_heartbeat.set()
@@ -133,14 +136,14 @@ async def global_exception_handler(request, exc):
 @app.get("/api/health")
 async def health_check():
     """全面的系统健康检查"""
-    pipeline = get_pipeline()
-    qe = get_query_engine()
-    cp = get_checkpoint()
+    pipeline = get_pipeline(DEFAULT_PROFILE)
+    qe = get_query_engine(DEFAULT_PROFILE)
+    cp = get_checkpoint(DEFAULT_PROFILE)
 
     health = {
         "status": "healthy",
         "version": "2.0.0",
-        "uptime_heartbeat": cp.is_alive(),
+        "uptime_heartbeat": cp.is_alive() if cp.is_active else {"alive": True, "note": "普通游玩模式，无需心跳监控"},
     }
 
     try:
@@ -159,8 +162,8 @@ async def health_check():
 
 @app.get("/api/status")
 async def get_status(_: str = Depends(verify_api_key)):
-    pipeline = get_pipeline()
-    cp = get_checkpoint()
+    pipeline = get_pipeline(DEFAULT_PROFILE)
+    cp = get_checkpoint(DEFAULT_PROFILE)
     progress = cp.get_progress() if cp.can_resume() else None
     return {
         "status": "running",
@@ -178,8 +181,9 @@ async def get_status(_: str = Depends(verify_api_key)):
 async def ingest_dialogue(
     turn: DialogueTurn,
     _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
 ):
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(profile)
     result = pipeline.process_turn(
         speaker=turn.speaker,
         name=turn.name or ("用户" if turn.speaker == "user" else "AI"),
@@ -197,8 +201,9 @@ async def ingest_dialogue(
 async def query_dialogue(
     req: QueryRequest,
     _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
 ):
-    engine = get_query_engine()
+    engine = get_query_engine(profile)
     search_results = engine.multi_search(
         dialogue_context=req.context,
         collections=req.collections,
@@ -215,13 +220,17 @@ async def query_dialogue(
     }
 
     if req.generate_constraint and search_results["results"]:
-        ce = get_constraint_engine()
+        ce = get_constraint_engine(profile)
         constraint = ce.generate_constraints(
             search_results=search_results,
             dialogue_context=req.context,
         )
         response["constraint_text"] = constraint
         response["active_constraints"] = ce.get_active_constraints()
+        if constraint:
+            logger.info(
+                f"注入 LLM 约束 ({len(ce.get_active_constraints())} 条):\n{constraint}"
+            )
 
     return response
 
@@ -234,19 +243,23 @@ async def query_dialogue(
 async def batch_ingest(
     req: BatchIngestRequest = None,
     _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
 ):
     file_path = req.file_path if req else None
     resume = req.resume if req else False
 
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(profile)
     result = pipeline.process_batch_txt(file_path=file_path, resume=resume)
     return result
 
 
 @app.get("/api/checkpoint/status")
-async def checkpoint_status(_: str = Depends(verify_api_key)):
+async def checkpoint_status(
+    _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
+):
     """查询当前断点/续点执行状态"""
-    cp = get_checkpoint()
+    cp = get_checkpoint(profile)
     return {
         "has_checkpoint": cp.can_resume(),
         "progress": cp.get_progress(),
@@ -258,9 +271,10 @@ async def checkpoint_status(_: str = Depends(verify_api_key)):
 async def checkpoint_resume(
     req: IngestParams = None,
     _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
 ):
     """从断点恢复批量导入"""
-    cp = get_checkpoint()
+    cp = get_checkpoint(profile)
     if not cp.can_resume():
         raise HTTPException(
             status_code=404,
@@ -270,7 +284,7 @@ async def checkpoint_resume(
     progress = cp.get_progress()
     logger.info(f"从断点恢复: {progress['execution_id']}")
 
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(profile)
     file_path = req.file_path if req else None
     result = pipeline.process_batch_txt(file_path=file_path, resume=True)
     return {
@@ -280,9 +294,12 @@ async def checkpoint_resume(
 
 
 @app.post("/api/checkpoint/clear")
-async def checkpoint_clear(_: str = Depends(verify_api_key)):
+async def checkpoint_clear(
+    _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
+):
     """清除所有断点数据（放弃未完成任务）"""
-    cp = get_checkpoint()
+    cp = get_checkpoint(profile)
     progress = cp.get_progress()
     cp.clear_checkpoint()
     logger.info(f"已清除断点: {progress.get('execution_id', 'N/A')}")
@@ -297,13 +314,14 @@ async def checkpoint_clear(_: str = Depends(verify_api_key)):
 async def update_skill(
     req: SkillUpdateRequest,
     _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
 ):
     import chromadb
     from sentence_transformers import SentenceTransformer
-    from config import CHROMA_PATH, COLLECTION_SKILLS, MODEL_NAME
+    from config import COLLECTION_SKILLS, MODEL_NAME, get_chroma_path
 
     model = SentenceTransformer(MODEL_NAME)
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    client = chromadb.PersistentClient(path=get_chroma_path(profile))
     collection = client.get_collection(name=COLLECTION_SKILLS)
 
     results = collection.get(where={"entry_key": req.entry_key})
@@ -321,7 +339,7 @@ async def update_skill(
         embeddings=[new_emb],
     )
 
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(profile)
     pipeline.invalidate_terms_cache()
 
     return {
@@ -335,8 +353,9 @@ async def update_skill(
 async def submit_feedback(
     req: FeedbackRequest,
     _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
 ):
-    ce = get_constraint_engine()
+    ce = get_constraint_engine(profile)
     ce.update_feedback(req.entry_type, req.was_used)
     return {
         "status": "ok",
@@ -346,11 +365,15 @@ async def submit_feedback(
 
 
 @app.get("/api/constraints/current")
-async def get_current_constraints(_: str = Depends(verify_api_key)):
+async def get_current_constraints(
+    _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
+):
     """获取当前生效的剧情约束（供 UI 展示）"""
-    ce = get_constraint_engine()
+    ce = get_constraint_engine(profile)
     return {
         "active_constraints": ce.get_active_constraints(),
+        "constraint_text": ce._last_constraint_text,
         "display_text": ce.get_display_text(),
         "count": len(ce.get_active_constraints()),
     }

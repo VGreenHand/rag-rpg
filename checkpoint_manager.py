@@ -12,11 +12,9 @@ from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass, field, asdict
 
-from config import BASE_DIR
+from config import BASE_DIR, get_checkpoint_dir, DEFAULT_PROFILE
 
 CHECKPOINT_DIR = BASE_DIR / ".checkpoints"
-CHECKPOINT_FILE = CHECKPOINT_DIR / "execution_state.json"
-HEARTBEAT_FILE = CHECKPOINT_DIR / "heartbeat.json"
 MAX_HEARTBEAT_AGE = 30
 DEFAULT_TIMEOUT = 10.0
 
@@ -57,8 +55,12 @@ class TimeoutError(Exception):
 
 
 class CheckpointManager:
-    def __init__(self):
-        CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    def __init__(self, profile: str = DEFAULT_PROFILE):
+        self._profile = profile
+        cp_dir = get_checkpoint_dir(profile)
+        cp_dir.mkdir(parents=True, exist_ok=True)
+        self._checkpoint_file = cp_dir / "execution_state.json"
+        self._heartbeat_file = cp_dir / "heartbeat.json"
         self._lock = threading.RLock()
         self._state: Optional[ExecutionState] = None
         self._heartbeat_interval = 5
@@ -83,7 +85,7 @@ class CheckpointManager:
                 "updated_at": self._state.updated_at,
                 "stats": self._state.stats,
             }
-            with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
+            with open(self._checkpoint_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
     def init_task(self, task_type: str, task_params: dict,
@@ -114,10 +116,10 @@ class CheckpointManager:
 
     def load_state(self) -> Optional[dict]:
         """加载最近的持久化状态"""
-        if not CHECKPOINT_FILE.exists():
+        if not self._checkpoint_file.exists():
             return None
         try:
-            with open(CHECKPOINT_FILE, "r", encoding="utf-8") as f:
+            with open(self._checkpoint_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             steps = [StepState(**s) for s in data.get("steps", [])]
             self._state = ExecutionState(
@@ -221,9 +223,13 @@ class CheckpointManager:
             ],
         }
 
+    @property
+    def is_active(self) -> bool:
+        return self._state is not None and self._state.status in ("running", "paused")
+
     def can_resume(self) -> bool:
         """检查是否存在可续点的未完成任务"""
-        if not CHECKPOINT_FILE.exists():
+        if not self._checkpoint_file.exists():
             return False
         data = self.load_state()
         if data is None:
@@ -292,7 +298,7 @@ class CheckpointManager:
                 "pid": os.getpid(),
             }
         try:
-            with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+            with open(self._heartbeat_file, "w", encoding="utf-8") as f:
                 json.dump(heartbeat, f)
         except Exception:
             pass
@@ -303,10 +309,10 @@ class CheckpointManager:
 
     def is_alive(self) -> dict:
         """检查服务是否存活（基于心跳文件）"""
-        if not HEARTBEAT_FILE.exists():
+        if not self._heartbeat_file.exists():
             return {"alive": False, "age_seconds": -1, "reason": "无心跳文件"}
         try:
-            with open(HEARTBEAT_FILE, "r", encoding="utf-8") as f:
+            with open(self._heartbeat_file, "r", encoding="utf-8") as f:
                 hb = json.load(f)
             last_ts = datetime.fromisoformat(hb["timestamp"])
             age = (datetime.now() - last_ts).total_seconds()
@@ -326,16 +332,15 @@ class CheckpointManager:
         with self._lock:
             self._stop_heartbeat.set()
             self._state = None
-            for f in (CHECKPOINT_FILE, HEARTBEAT_FILE):
+            for f in (self._checkpoint_file, self._heartbeat_file):
                 if f.exists():
                     f.unlink(missing_ok=True)
 
 
-_checkpoint_instance: Optional[CheckpointManager] = None
+_checkpoint_instances: dict[str, CheckpointManager] = {}
 
 
-def get_checkpoint() -> CheckpointManager:
-    global _checkpoint_instance
-    if _checkpoint_instance is None:
-        _checkpoint_instance = CheckpointManager()
-    return _checkpoint_instance
+def get_checkpoint(profile: str = DEFAULT_PROFILE) -> CheckpointManager:
+    if profile not in _checkpoint_instances:
+        _checkpoint_instances[profile] = CheckpointManager(profile)
+    return _checkpoint_instances[profile]

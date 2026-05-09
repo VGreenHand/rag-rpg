@@ -17,6 +17,8 @@ const API_TIMEOUT = 5000;
 const defaultSettings = {
     api_url: 'http://127.0.0.1:8765',
     api_key: 'rag-rpg-local',
+    game_profile: 'default',
+    auto_profile: true,
     auto_ingest: true,
     auto_query: true,
     inject_constraints: true,
@@ -43,6 +45,7 @@ function getPanelHtml() {
             <span id="rag-rpg-close-btn" style="cursor:pointer;color:#888;"
                 title="关闭">✕</span>
         </div>
+        <div id="rag-rpg-profile-badge" style="font-size:10px;color:#6a8;margin-bottom:4px;"></div>
         <div id="rag-rpg-constraints-list">
             <div style="color:#666;text-align:center;padding:10px 0;">
                 暂无约束（进行对话后自动更新）
@@ -99,6 +102,7 @@ async function callApi(endpoint, data) {
             headers: {
                 'Content-Type': 'application/json',
                 'X-API-Key': settings.api_key,
+                'X-Game-Profile': settings.game_profile,
             },
             body: JSON.stringify(data),
             signal: controller.signal,
@@ -126,6 +130,7 @@ async function callApiGet(endpoint) {
             method: 'GET',
             headers: {
                 'X-API-Key': settings.api_key,
+                'X-Game-Profile': settings.game_profile,
             },
         });
         if (!response.ok) return null;
@@ -179,10 +184,21 @@ async function refreshConstraintsPanel() {
     }
 }
 
+function updateProfileBadge() {
+    const badge = document.getElementById('rag-rpg-profile-badge');
+    if (!badge) return;
+    const settings = getSettings();
+    const context = getContext();
+    const charName = context.name2 || context.name || '';
+    const label = charName ? `${charName} (${settings.game_profile})` : settings.game_profile;
+    badge.textContent = `📂 ${label}`;
+}
+
 function togglePanel(show) {
     const panel = document.getElementById('rag-rpg-panel');
     if (panel) {
         panel.style.display = show ? 'block' : 'none';
+        if (show) updateProfileBadge();
     }
 }
 
@@ -263,7 +279,27 @@ async function onChatChanged() {
     turnCounter = 0;
     lastProcessedMessage = '';
     log('对话已切换，计数器重置');
+
+    const settings = getSettings();
+    if (settings.auto_profile) {
+        const context = getContext();
+        const charId = context.characterId;
+        const charName = context.name2 || context.name || '';
+
+        let newProfile = 'default';
+        if (charId && charId !== 'undefined' && charId !== '') {
+            newProfile = `char_${String(charId).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+        }
+
+        if (settings.game_profile !== newProfile) {
+            settings.game_profile = newProfile;
+            saveSettingsDebounced();
+            log(`自动切换数据存储: ${newProfile}${charName ? ` (${charName})` : ''}`);
+        }
+    }
+
     togglePanel(false);
+    updateProfileBadge();
 }
 
 // ─── 初始化 ────────────────────────────────────────────────
@@ -274,6 +310,9 @@ jQuery(async () => {
     // 注入面板 HTML
     const panelHtml = getPanelHtml();
     $('body').append(panelHtml);
+
+    // 显示初始 profile
+    updateProfileBadge();
 
     // 绑定面板事件
     $(document).on('click', '#rag-rpg-close-btn', () => togglePanel(false));
