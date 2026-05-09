@@ -248,15 +248,37 @@ class DialoguePipeline:
     # ─── TXT写入 ─────────────────────────────────
 
     def _write_txt(self, speaker: str, name: str, content: str,
-                   turn: int, key_terms: list[str]) -> str:
+                   turn: int, key_terms: list[str],
+                   session_id: str = None) -> str:
         today = datetime.now().strftime("%Y-%m-%d")
         dialogue_dir = get_dialogue_dir(self._profile)
-        dialogue_dir.mkdir(parents=True, exist_ok=True)
-        filepath = dialogue_dir / f"dialogue_{today}.txt"
+
+        if session_id:
+            dialogue_dir = dialogue_dir / today
+            dialogue_dir.mkdir(parents=True, exist_ok=True)
+            safe_sid = "".join(c if c.isalnum() or c in "_-" else "_" for c in session_id)
+            filepath = dialogue_dir / f"session_{safe_sid}.txt"
+        else:
+            dialogue_dir.mkdir(parents=True, exist_ok=True)
+            filepath = dialogue_dir / f"dialogue_{today}.txt"
 
         timestamp = datetime.now().strftime("%H:%M:%S")
         role_tag = "USER" if speaker == "user" else "AI"
         terms_str = ", ".join(key_terms[:8]) if key_terms else "-"
+
+        is_new_file = not filepath.exists()
+        if is_new_file and session_id:
+            init_block = (
+                f"{'═' * 60}\n"
+                f"会话开始 | ID: {session_id}\n"
+                f"角色: {name if speaker == 'ai' else '用户'}\n"
+                f"创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"{'═' * 60}\n\n"
+            )
+            def _write_init():
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(init_block)
+            SafeTimer.run(_write_init, FILE_IO_TIMEOUT)
 
         block = (
             f"\n{'─' * 60}\n"
@@ -323,7 +345,7 @@ class DialoguePipeline:
     # ─── 核心处理流程 ─────────────────────────────
 
     def process_turn(self, speaker: str, name: str, content: str,
-                     turn: int) -> dict:
+                     turn: int, session_id: str = None) -> dict:
         raw_len = len(content)
 
         try:
@@ -351,7 +373,7 @@ class DialoguePipeline:
 
         txt_path = ""
         try:
-            txt_path = self._write_txt(speaker, name, clean_text, turn, key_terms)
+            txt_path = self._write_txt(speaker, name, clean_text, turn, key_terms, session_id)
         except CkpTimeoutError:
             logger.warning(f"TXT写入超时 Turn#{turn}")
         except Exception as e:

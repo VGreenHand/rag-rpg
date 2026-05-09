@@ -206,6 +206,20 @@ function togglePanel(show) {
 
 let turnCounter = 0;
 let lastProcessedMessage = '';
+let currentSessionId = '';
+
+function generateSessionId() {
+    const context = getContext();
+    const charName = context.name2 || context.name || 'unknown';
+    const now = new Date();
+    const ts = now.getFullYear()
+        + String(now.getMonth() + 1).padStart(2, '0')
+        + String(now.getDate()).padStart(2, '0') + '_'
+        + String(now.getHours()).padStart(2, '0')
+        + String(now.getMinutes()).padStart(2, '0');
+    const slug = charName.replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]/g, '_').substring(0, 30);
+    return `${slug}_${ts}`;
+}
 
 async function handleMessageReceived() {
     const settings = getSettings();
@@ -228,12 +242,18 @@ async function handleMessageReceived() {
 
     log(`捕获对话 Turn#${turnCounter} | ${speaker} | ${name}`);
 
+    if (!currentSessionId) {
+        currentSessionId = generateSessionId();
+        log(`兜底生成 session_id: ${currentSessionId}`);
+    }
+
     await callApi('/api/dialogue/ingest', {
         speaker: speaker,
         name: name,
         content: mes,
         turn: turnCounter,
         timestamp: new Date().toISOString(),
+        session_id: currentSessionId,
     });
 }
 
@@ -278,7 +298,8 @@ async function handleGenerationBefore() {
 async function onChatChanged() {
     turnCounter = 0;
     lastProcessedMessage = '';
-    log('对话已切换，计数器重置');
+    currentSessionId = generateSessionId();
+    log(`会话已切换，新 session_id: ${currentSessionId}`);
 
     const settings = getSettings();
     if (settings.auto_profile) {
@@ -313,6 +334,10 @@ jQuery(async () => {
 
     // 显示初始 profile
     updateProfileBadge();
+
+    // 初始化时生成 session_id（覆盖已打开对话未触发 CHAT_CHANGED 的情况）
+    currentSessionId = generateSessionId();
+    log(`初始化 session_id: ${currentSessionId}`);
 
     // 绑定面板事件
     $(document).on('click', '#rag-rpg-close-btn', () => togglePanel(false));

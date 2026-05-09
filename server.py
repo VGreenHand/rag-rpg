@@ -34,6 +34,7 @@ class DialogueTurn(BaseModel):
     content: str = Field(..., description="对话内容")
     turn: int = Field(default=0, description="对话轮次序号")
     timestamp: Optional[str] = Field(default=None)
+    session_id: Optional[str] = Field(default=None, description="会话标识符，用于 TXT 文件隔离")
 
 
 class QueryRequest(BaseModel):
@@ -189,9 +190,11 @@ async def ingest_dialogue(
         name=turn.name or ("用户" if turn.speaker == "user" else "AI"),
         content=turn.content,
         turn=turn.turn,
+        session_id=turn.session_id,
     )
     logger.info(
         f"已处理 Turn#{turn.turn} | {turn.speaker} | "
+        f"session={turn.session_id or 'default'} | "
         f"关键术语: {result['key_terms_found'][:5]}"
     )
     return result
