@@ -8,7 +8,6 @@ import logging
 from typing import Optional, Union
 
 import chromadb
-from sentence_transformers import SentenceTransformer
 
 from config import (
     CHROMA_PATH, MODEL_NAME, COLLECTION_SKILLS,
@@ -17,6 +16,7 @@ from config import (
     get_chroma_path, DEFAULT_PROFILE,
 )
 from checkpoint_manager import TimeoutError as CkpTimeoutError
+from embedding_client import get_embedding_client
 
 logger = logging.getLogger("rag-rpg.query")
 
@@ -50,7 +50,7 @@ class SafeTimer:
 class QueryEngine:
     def __init__(self, profile: str = DEFAULT_PROFILE):
         self._profile = profile
-        self.model = SentenceTransformer(MODEL_NAME)
+        self.model = get_embedding_client()
         self.client = chromadb.PersistentClient(path=get_chroma_path(profile))
         self._collections: dict[str, object] = {}
         self._stats: dict[str, int] = {"timeouts": 0, "degraded": 0, "errors": 0}

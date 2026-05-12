@@ -12,7 +12,7 @@ import { extension_settings, getContext } from '../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 
 const EXTENSION_NAME = 'RAG-RPG';
-const API_TIMEOUT = 5000;
+const API_TIMEOUT = 15000;
 
 const defaultSettings = {
     api_url: 'http://127.0.0.1:8765',
@@ -87,6 +87,98 @@ function log(...args) {
     if (getSettings().debug_mode) {
         console.log(`[${EXTENSION_NAME}]`, ...args);
     }
+}
+
+function alwaysLog(...args) {
+    console.log(`[${EXTENSION_NAME}]`, ...args);
+}
+
+// ─── 设置面板 HTML（ST 通过全局对象访问此函数）───────
+
+globalThis.getSettingsHtml = function() {
+    const s = getSettings();
+    return `
+    <div class="rag-rpg-settings">
+        <div class="inline-drawer">
+            <div class="inline-drawer-toggle inline-drawer-header">
+                <b>RAG-RPG 记忆引擎</b>
+                <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+            </div>
+            <div class="inline-drawer-content" style="padding:10px;">
+                <label class="checkbox_label">
+                    <input type="checkbox" id="rag-rpg-auto-ingest" ${s.auto_ingest ? 'checked' : ''}>
+                    <span>自动记录对话</span>
+                </label>
+                <label class="checkbox_label">
+                    <input type="checkbox" id="rag-rpg-auto-query" ${s.auto_query ? 'checked' : ''}>
+                    <span>自动查询约束</span>
+                </label>
+                <label class="checkbox_label">
+                    <input type="checkbox" id="rag-rpg-inject-constraints" ${s.inject_constraints ? 'checked' : ''}>
+                    <span>注入剧情约束</span>
+                </label>
+                <label class="checkbox_label">
+                    <input type="checkbox" id="rag-rpg-show-panel" ${s.show_constraints_panel ? 'checked' : ''}>
+                    <span>显示约束浮动面板</span>
+                </label>
+                <hr>
+                <label>API URL:
+                    <input type="text" id="rag-rpg-api-url" value="${s.api_url}" style="width:100%;">
+                </label>
+                <label>API Key:
+                    <input type="text" id="rag-rpg-api-key" value="${s.api_key}" style="width:100%;">
+                </label>
+                <label>查询轮次:
+                    <input type="number" id="rag-rpg-query-turns" value="${s.query_turns}" min="1" max="20" style="width:60px;">
+                </label>
+                <hr>
+                <div style="color:#888;font-size:11px;">
+                    <div>状态: <span id="rag-rpg-settings-status">未知</span></div>
+                    <button id="rag-rpg-test-btn" class="menu_button" style="margin-top:4px;">测试连接</button>
+                </div>
+            </div>
+        </div>
+    </div>`;
+};
+
+console.log(`[${EXTENSION_NAME}] 扩展已加载, 等待初始化...`);
+
+function onSettingsChange() {
+    const s = getSettings();
+    s.auto_ingest = $('#rag-rpg-auto-ingest').prop('checked');
+    s.auto_query = $('#rag-rpg-auto-query').prop('checked');
+    s.inject_constraints = $('#rag-rpg-inject-constraints').prop('checked');
+    s.show_constraints_panel = $('#rag-rpg-show-panel').prop('checked');
+    s.debug_mode = $('#rag-rpg-debug-mode').prop('checked');
+    s.api_url = String($('#rag-rpg-api-url').val() || defaultSettings.api_url);
+    s.api_key = String($('#rag-rpg-api-key').val() || defaultSettings.api_key);
+    s.query_turns = parseInt($('#rag-rpg-query-turns').val()) || defaultSettings.query_turns;
+    if (s.api_url.endsWith('/')) s.api_url = s.api_url.slice(0, -1);
+    saveSettingsDebounced();
+    alwaysLog('设置已更新');
+}
+
+function registerSettingsHandlers() {
+    $(document).on('change', '#rag-rpg-auto-ingest', onSettingsChange);
+    $(document).on('change', '#rag-rpg-auto-query', onSettingsChange);
+    $(document).on('change', '#rag-rpg-inject-constraints', onSettingsChange);
+    $(document).on('change', '#rag-rpg-show-panel', onSettingsChange);
+    $(document).on('change', '#rag-rpg-debug-mode', onSettingsChange);
+    $(document).on('input', '#rag-rpg-api-url', onSettingsChange);
+    $(document).on('input', '#rag-rpg-api-key', onSettingsChange);
+    $(document).on('input', '#rag-rpg-query-turns', onSettingsChange);
+    $(document).on('click', '#rag-rpg-test-btn', async () => {
+        const statusEl = document.getElementById('rag-rpg-settings-status');
+        statusEl.textContent = '测试中...';
+        try {
+            const resp = await fetch(`${getSettings().api_url}/api/health`, {
+                headers: { 'X-API-Key': getSettings().api_key }
+            });
+            statusEl.textContent = resp.ok ? '✅ 连接成功' : `❌ HTTP ${resp.status}`;
+        } catch (e) {
+            statusEl.textContent = `❌ ${e.message}`;
+        }
+    });
 }
 
 // ─── API 调用 ──────────────────────────────────────────────
@@ -207,6 +299,7 @@ function togglePanel(show) {
 let turnCounter = 0;
 let lastProcessedMessage = '';
 let currentSessionId = '';
+let pendingConstraint = '';
 
 function generateSessionId() {
     const context = getContext();
@@ -247,7 +340,8 @@ async function handleMessageReceived() {
         log(`兜底生成 session_id: ${currentSessionId}`);
     }
 
-    await callApi('/api/dialogue/ingest', {
+    // ingest 和 query 并发执行，互不阻塞
+    const ingestPromise = callApi('/api/dialogue/ingest', {
         speaker: speaker,
         name: name,
         content: mes,
@@ -255,15 +349,65 @@ async function handleMessageReceived() {
         timestamp: new Date().toISOString(),
         session_id: currentSessionId,
     });
+
+    let queryPromise = Promise.resolve(null);
+    if (speaker === 'user') {
+        alwaysLog('用户消息已发送，并发预查约束...');
+        const context = getContext();
+        const chat = context.chat;
+        const recentTurns = (chat || []).slice(-getSettings().query_turns);
+        const dialogueContext = recentTurns.map(m => ({
+            speaker: m.is_user ? 'user' : 'ai',
+            content: String(m.mes || ''),
+        }));
+        queryPromise = callApi('/api/dialogue/query', {
+            context: dialogueContext,
+            max_results: getSettings().max_results,
+            generate_constraint: getSettings().inject_constraints,
+        });
+    }
+
+    const [ingestResult, queryResult] = await Promise.all([ingestPromise, queryPromise]);
+
+    if (!ingestResult) {
+        alwaysLog('ingest 返回空（可能超时）');
+    }
+
+    if (speaker === 'user' && queryResult && queryResult.constraint_text) {
+        pendingConstraint = queryResult.constraint_text;
+        alwaysLog(`约束已预取 (${queryResult.total_hits} 条命中)`);
+        const context = getContext();
+        context.setExtensionPrompt(EXTENSION_NAME, queryResult.constraint_text);
+        alwaysLog('约束已直接注入 setExtensionPrompt');
+        if (getSettings().show_constraints_panel && queryResult.active_constraints) {
+            updateConstraintsPanel(queryResult);
+            togglePanel(true);
+        }
+    } else if (speaker === 'user') {
+        pendingConstraint = '';
+        alwaysLog('预查约束返回空');
+    }
 }
 
 async function handleGenerationBefore() {
     const settings = getSettings();
-    if (!settings.auto_query) return;
-
     const context = getContext();
+
+    // 优先使用预取的约束
+    if (pendingConstraint) {
+        context.setExtensionPrompt(EXTENSION_NAME, pendingConstraint);
+        alwaysLog('使用预取约束注入 setExtensionPrompt');
+        pendingConstraint = '';
+        return;
+    }
+
+    // 兜底：尝试实时查询
+    alwaysLog('无预取约束，实时查询...');
     const chat = context.chat;
-    if (!chat || chat.length < 2) return;
+    if (!chat || chat.length < 2) {
+        alwaysLog('对话历史不足2轮, 跳过查询');
+        return;
+    }
 
     const recentTurns = chat.slice(-settings.query_turns);
     const dialogueContext = recentTurns.map(m => ({
@@ -271,27 +415,21 @@ async function handleGenerationBefore() {
         content: String(m.mes || ''),
     }));
 
-    log(`查询向量库 (最近${dialogueContext.length}轮对话)...`);
-
     const result = await callApi('/api/dialogue/query', {
         context: dialogueContext,
         max_results: settings.max_results,
         generate_constraint: settings.inject_constraints,
     });
 
-    if (result) {
-        log(`查询完成: ${result.total_hits} 条命中`);
-
+    if (result && result.constraint_text) {
+        context.setExtensionPrompt(EXTENSION_NAME, result.constraint_text);
+        alwaysLog(`实时查询约束已注入 (${result.total_hits} 条命中)`);
         if (settings.show_constraints_panel && result.active_constraints) {
             updateConstraintsPanel(result);
             togglePanel(true);
         }
-
-        if (result.constraint_text) {
-            context.setExtensionPrompt(EXTENSION_NAME, result.constraint_text);
-        } else if (result.formatted) {
-            context.setExtensionPrompt(EXTENSION_NAME, result.formatted);
-        }
+    } else {
+        alwaysLog('实时查询约束返回空');
     }
 }
 
@@ -328,6 +466,14 @@ async function onChatChanged() {
 jQuery(async () => {
     loadSettings();
 
+    // 强制开启核心功能（不依赖设置面板）
+    const s = getSettings();
+    s.auto_query = true;
+    s.inject_constraints = true;
+    s.auto_ingest = true;
+    saveSettingsDebounced();
+    alwaysLog('核心设置已强制开启: auto_query=true, inject_constraints=true');
+
     // 注入面板 HTML
     const panelHtml = getPanelHtml();
     $('body').append(panelHtml);
@@ -349,5 +495,5 @@ jQuery(async () => {
     eventSource.on(event_types.GENERATION_BEFORE_COMMANDS, handleGenerationBefore);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
 
-    console.log(`[${EXTENSION_NAME}] v2.0 已加载 → ${getSettings().api_url}`);
+    alwaysLog(`v2.0 已加载 → ${s.api_url}`);
 });

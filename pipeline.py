@@ -1,6 +1,6 @@
 """
 对话处理管道：接收原始对话 → 清洗 → 提取关键信息 → 写入TXT → 向量入库
-v3.0: 记忆去重 + 智能压缩 + 技能熟练度覆盖更新
+v3.1: 向量库只存核心对话内容（过滤叙事描写），TXT 保留完整原文
 """
 import re
 import uuid
@@ -12,16 +12,16 @@ from pathlib import Path
 from typing import Optional, Callable
 
 import chromadb
-from sentence_transformers import SentenceTransformer
 
 from config import (
     CHROMA_PATH, COLLECTION_DIALOGUE, COLLECTION_SKILLS,
     MODEL_NAME, DIALOGUE_DIR, BATCH_FILE, COLLECTION_MEMORY,
-    DEDUP_SIMILARITY_THRESHOLD, SUMMARY_MAX_CHARS,
+    DEDUP_SIMILARITY_THRESHOLD,
     SKILL_PROFICIENCY_PATTERN,
     get_chroma_path, get_dialogue_dir, get_batch_file, DEFAULT_PROFILE,
 )
 from checkpoint_manager import get_checkpoint, TimeoutError as CkpTimeoutError
+from embedding_client import get_embedding_client
 
 logger = logging.getLogger("rag-rpg.pipeline")
 
@@ -29,6 +29,7 @@ EMBED_TIMEOUT = 15.0
 CHROMA_TIMEOUT = 8.0
 FILE_IO_TIMEOUT = 5.0
 TERM_LOAD_LIMIT = 2000
+SUMMARY_MAX_CHARS = 800
 
 
 class SafeTimer:
@@ -56,7 +57,7 @@ class SafeTimer:
 class DialoguePipeline:
     def __init__(self, profile: str = DEFAULT_PROFILE):
         self._profile = profile
-        self.model = SentenceTransformer(MODEL_NAME)
+        self.model = get_embedding_client()
         self.client = chromadb.PersistentClient(path=get_chroma_path(profile))
         self.dialogue_col = self.client.get_or_create_collection(
             name=COLLECTION_DIALOGUE,
@@ -97,10 +98,50 @@ class DialoguePipeline:
 
     # ─── 功能1: 智能摘要 ──────────────────────────
 
-    def _summarize_text(self, text: str) -> str:
-        if len(text) <= SUMMARY_MAX_CHARS:
+    def _extract_core_content(self, text: str) -> str:
+        """从对话文本中提取核心信息（用于向量存储），
+        优先保留「」内对话内容（信息密度最高），过滤（）内叙事描写。"""
+        if not text:
+            return ""
+        if len(text) <= 120:
             return text
-        sentences = re.split(r'(?<=[。！？])', text)
+
+        parts = []
+        depth = 0
+        current = []
+        for ch in text:
+            if ch == '「':
+                if depth > 0:
+                    current.append(ch)
+                depth += 1
+            elif ch == '」':
+                depth -= 1
+                if depth == 0:
+                    candidate = "".join(current).strip()
+                    if len(candidate) > 2:
+                        parts.append(candidate)
+                    current = []
+                else:
+                    current.append(ch)
+            elif depth > 0:
+                current.append(ch)
+
+        if not parts:
+            return text[:SUMMARY_MAX_CHARS]
+
+        if current:
+            candidate = "".join(current).strip()
+            if len(candidate) > 2:
+                parts.append(candidate)
+
+        result = "；".join(p for p in parts if len(p) > 2)
+        if not result:
+            return text[:SUMMARY_MAX_CHARS]
+
+        if len(result) <= SUMMARY_MAX_CHARS:
+            return result
+
+        sentences = re.split(r'(?<=[。！？；])', result)
         kept = []
         current_len = 0
         for s in sentences:
@@ -111,10 +152,7 @@ class DialoguePipeline:
                 break
             kept.append(s)
             current_len += len(s)
-        result = "".join(kept)
-        if len(result) < len(text) * 0.3:
-            return text[:SUMMARY_MAX_CHARS]
-        return result
+        return "".join(kept) if kept else result[:SUMMARY_MAX_CHARS]
 
     # ─── 功能1: 记忆去重 ──────────────────────────
 
@@ -170,13 +208,25 @@ class DialoguePipeline:
             try:
                 col = self.client.get_collection(name=col_name)
                 count = col.count()
+                if count == 0 and col_name == COLLECTION_SKILLS and self._profile != DEFAULT_PROFILE:
+                    try:
+                        fallback_client = chromadb.PersistentClient(path=get_chroma_path(DEFAULT_PROFILE))
+                        col = fallback_client.get_collection(name=col_name)
+                        count = col.count()
+                    except Exception:
+                        pass
                 if count == 0:
                     continue
                 results = SafeTimer.run(col.get, CHROMA_TIMEOUT, limit=TERM_LOAD_LIMIT)
+                if results is None:
+                    continue
                 for meta in results.get("metadatas", []):
                     ek = meta.get("entry_key", "")
                     if ek:
                         terms.add(ek)
+                        bare = ek.replace('\u00b7', '').replace('\u2022', '').replace('·', '')
+                        if bare != ek:
+                            terms.add(bare)
                 for doc in results.get("documents", []):
                     tag_match = re.search(r'^(技能|机制|设定|剧情|背景)[：:]', doc)
                     if tag_match:
@@ -193,57 +243,116 @@ class DialoguePipeline:
 
     # ─── 功能2: 技能熟练度检测与覆盖更新 ────────────
 
-    def _detect_skill_proficiency(self, text: str,
-                                  key_terms: list[str]) -> Optional[dict]:
-        match = re.search(SKILL_PROFICIENCY_PATTERN, text)
-        if not match:
-            return None
-        proficiency = int(match.group(1))
-        entry_key = None
+    def _detect_all_proficiencies(self, text: str,
+                                  key_terms: list[str]) -> list[dict]:
+        """从文本中找出所有「熟练度 N/100」，为每个技能生成单独的更新任务。
+        使用原始文本（txt_ready）而非核心提取后的文本，因为熟练度行通常在「」之外。"""
+        if not text:
+            return []
+        updates = []
+        for match in re.finditer(SKILL_PROFICIENCY_PATTERN, text):
+            proficiency = int(match.group(1))
+            match_pos = match.start()
+            preceding = text[max(0, match_pos - 60):match_pos]
+            matched_term = None
+            for term in sorted(key_terms, key=len, reverse=True):
+                if term in preceding:
+                    matched_term = term
+                    break
+            if not matched_term:
+                continue
+            entry_key = self._match_entry_key([matched_term])
+            if entry_key:
+                updates.append({"entry_key": entry_key, "proficiency": proficiency})
+        return updates
+
+    def _match_entry_key(self, key_terms: list[str]) -> Optional[str]:
+        """从 key_terms 中匹配 DB 中的技能 entry_key，支持不带间隔号的模糊匹配"""
+        col = self.skill_col
         for term in key_terms:
             try:
-                col = self.skill_col
                 results = col.get(where={"entry_key": term})
-                if results["ids"]:
-                    entry_key = term
-                    break
+                if results and results.get("ids"):
+                    return term
             except Exception:
                 continue
-        if not entry_key:
-            return None
-        return {"entry_key": entry_key, "proficiency": proficiency}
+        db_data = None
+        for term in key_terms:
+            try:
+                if db_data is None:
+                    db_data = col.get()
+                stripped_term = self._strip_dot(term)
+                for i in range(len(db_data["ids"])):
+                    ek = db_data["metadatas"][i].get("entry_key", "")
+                    if self._strip_dot(ek) == stripped_term:
+                        return ek
+            except Exception:
+                continue
+        if self._profile != DEFAULT_PROFILE:
+            try:
+                fallback_client = chromadb.PersistentClient(path=get_chroma_path(DEFAULT_PROFILE))
+                fallback_col = fallback_client.get_collection(name=COLLECTION_SKILLS)
+                for term in key_terms:
+                    try:
+                        results = fallback_col.get(where={"entry_key": term})
+                        if results and results.get("ids"):
+                            return term
+                    except Exception:
+                        continue
+                fb_data = fallback_col.get()
+                stripped_term = self._strip_dot(key_terms[0]) if key_terms else ""
+                for i in range(len(fb_data["ids"])):
+                    ek = fb_data["metadatas"][i].get("entry_key", "")
+                    if self._strip_dot(ek) == stripped_term:
+                        return ek
+            except Exception:
+                pass
+        return None
+
+    @staticmethod
+    def _strip_dot(s: str) -> str:
+        return s.replace('\u00b7', '').replace('\u2022', '').replace('·', '')
 
     def _update_skill_proficiency(self, entry_key: str,
                                   proficiency: int) -> bool:
-        try:
-            results = self.skill_col.get(where={"entry_key": entry_key})
-            if not results["ids"]:
+        """更新技能熟练度。如果当前 profile 无对应条目，回退到 default profile。"""
+        for col, label in [(self.skill_col, self._profile), (None, "default")]:
+            try:
+                if col is None and self._profile != DEFAULT_PROFILE:
+                    fallback = chromadb.PersistentClient(path=get_chroma_path(DEFAULT_PROFILE))
+                    col = fallback.get_collection(name=COLLECTION_SKILLS)
+                elif col is None:
+                    break
+                results = col.get(where={"entry_key": entry_key})
+                if not results or not results.get("ids"):
+                    if label == "default":
+                        return False
+                    continue
+                old_id = results["ids"][0]
+                old_doc = results["documents"][0]
+                new_doc = re.sub(
+                    SKILL_PROFICIENCY_PATTERN,
+                    f"熟练度 {proficiency}/100",
+                    old_doc
+                )
+                new_emb = SafeTimer.run(
+                    self.model.encode, EMBED_TIMEOUT, new_doc
+                ).tolist()
+                SafeTimer.run(
+                    lambda c=col: c.update(
+                        ids=[old_id],
+                        documents=[new_doc],
+                        embeddings=[new_emb]
+                    ),
+                    CHROMA_TIMEOUT
+                )
+                logger.info(f"熟练度更新: {entry_key} → {proficiency}/100 ({label})")
+                self.invalidate_terms_cache()
+                return True
+            except Exception as e:
+                logger.error(f"熟练度更新失败 ({label}): {e}")
                 return False
-            old_id = results["ids"][0]
-            old_doc = results["documents"][0]
-            old_meta = results["metadatas"][0]
-            new_doc = re.sub(
-                SKILL_PROFICIENCY_PATTERN,
-                f"熟练度 {proficiency}/100",
-                old_doc
-            )
-            new_emb = SafeTimer.run(
-                self.model.encode, EMBED_TIMEOUT, new_doc
-            ).tolist()
-            SafeTimer.run(
-                lambda: self.skill_col.update(
-                    ids=[old_id],
-                    documents=[new_doc],
-                    embeddings=[new_emb]
-                ),
-                CHROMA_TIMEOUT
-            )
-            logger.info(f"熟练度更新: {entry_key} → {proficiency}/100")
-            self.invalidate_terms_cache()
-            return True
-        except Exception as e:
-            logger.error(f"熟练度更新失败: {e}")
-            return False
+        return False
 
     # ─── TXT写入 ─────────────────────────────────
 
@@ -345,7 +454,7 @@ class DialoguePipeline:
     # ─── 核心处理流程 ─────────────────────────────
 
     def process_turn(self, speaker: str, name: str, content: str,
-                     turn: int, session_id: str = None) -> dict:
+                     turn: int, session_id: str | None = None) -> dict:
         raw_len = len(content)
 
         try:
@@ -353,27 +462,26 @@ class DialoguePipeline:
         except Exception:
             clean_text = content[:500]
 
-        clean_text = self._summarize_text(clean_text)
+        txt_ready = clean_text
 
-        if clean_text:
-            key_terms = self._extract_key_terms(clean_text)
-        else:
-            key_terms = []
+        clean_text = self._extract_core_content(clean_text)
 
-        skill_update = self._detect_skill_proficiency(clean_text, key_terms)
-        if skill_update:
+        key_terms = self._extract_key_terms(txt_ready)
+
+        skill_updates = self._detect_all_proficiencies(txt_ready, key_terms)
+        for update in skill_updates:
             self._update_skill_proficiency(
-                skill_update["entry_key"],
-                skill_update["proficiency"]
+                update["entry_key"],
+                update["proficiency"]
             )
             self._report(
-                f"熟练度更新: {skill_update['entry_key']} "
-                f"→ {skill_update['proficiency']}/100"
+                f"熟练度更新: {update['entry_key']} "
+                f"→ {update['proficiency']}/100"
             )
 
         txt_path = ""
         try:
-            txt_path = self._write_txt(speaker, name, clean_text, turn, key_terms, session_id)
+            txt_path = self._write_txt(speaker, name, txt_ready, turn, key_terms, session_id)
         except CkpTimeoutError:
             logger.warning(f"TXT写入超时 Turn#{turn}")
         except Exception as e:
@@ -415,7 +523,8 @@ class DialoguePipeline:
             "raw_length": raw_len,
             "key_terms_found": key_terms,
             "turn": turn,
-            "skill_updated": bool(skill_update),
+            "skill_updated": len(skill_updates) > 0,
+            "skill_updates": len(skill_updates),
         }
 
     # ─── 断点续执行的批处理 ─────────────────────

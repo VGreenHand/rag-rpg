@@ -1,0 +1,61 @@
+{
+  "personas": {
+    "1778596365364-111.png": "111",
+    "yun_che.png": "云澈",
+    "iserlin_bladesoul.png": "伊瑟琳·剑风",
+    "1778597298327-.png": "测试人员",
+    "1778597614927-.png": "测试",
+    "1778598065308-.png": "无名"
+  },
+  "persona_descriptions": {
+    "1778596365364-111.png": {
+      "description": "",
+      "position": 0,
+      "depth": 2,
+      "role": 0,
+      "lorebook": "",
+      "title": ""
+    },
+    "yun_che.png": {
+      "description": "",
+      "position": 0,
+      "depth": 2,
+      "role": 0,
+      "lorebook": "",
+      "title": ""
+    },
+    "iserlin_bladesoul.png": {
+      "description": "",
+      "position": 0,
+      "depth": 2,
+      "role": 0,
+      "lorebook": "",
+      "title": ""
+    },
+    "1778597298327-.png": {
+      "description": "这是一个测试",
+      "position": 0,
+      "depth": 2,
+      "role": 0,
+      "lorebook": "Characterdesign",
+      "title": ""
+    },
+    "1778597614927-.png": {
+      "description": "",
+      "position": 0,
+      "depth": 2,
+      "role": 0,
+      "lorebook": "",
+      "connections": [],
+      "title": ""
+    },
+    "1778598065308-.png": {
+      "description": "姓名：无名\n身份：DNF世界观·剑神\n\n外貌：白发束成马尾，蒙眼布遮住双目。身着残破灰白长袍，腰间悬一把朴素无锋的铁剑。身周仿佛有透明剑意凝成实质，令人能\"看见\"周围轮廓。\n\n背景：曾是阿拉德大陆一位追求剑道极致的剑士，为领悟至高境界，舍弃了姓名与过往。历尽生死磨砺后，终于踏入万剑归宗的剑神之境。双目虽盲，心却如明镜，不再需要肉眼感知万物。默默守护着这片大陆的平衡，极少在世人前现身。",
+      "position": 0,
+      "depth": 2,
+      "role": 0,
+      "lorebook": "Characterdesign",
+      "title": ""
+    }
+  }
+}

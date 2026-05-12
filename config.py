@@ -27,6 +27,11 @@ API_HOST = "127.0.0.1"
 API_PORT = 8765
 API_KEY = os.environ.get("RAG_RPG_API_KEY", "rag-rpg-local")
 
+# --- Embedding Service ---
+EMBEDDING_SERVICE_HOST = "127.0.0.1"
+EMBEDDING_SERVICE_PORT = 8766
+EMBEDDING_SERVICE_URL = f"http://{EMBEDDING_SERVICE_HOST}:{EMBEDDING_SERVICE_PORT}"
+
 # --- Dialogue Processing ---
 DIALOGUE_DIR = BASE_DIR / "dialogues"
 MAX_CONTEXT_TURNS = 5
@@ -54,8 +59,7 @@ def get_batch_file(profile: str = DEFAULT_PROFILE) -> Path:
 
 # --- Deduplication ---
 DEDUP_SIMILARITY_THRESHOLD = 0.92
-SUMMARY_MAX_CHARS = 300
-SKILL_PROFICIENCY_PATTERN = r'熟练度\s*(\d+)/100'
+SKILL_PROFICIENCY_PATTERN = r'熟练度[\s：:]*(\d+)/100'
 
 # --- Constraint Engine ---
 CONSTRAINT_COOLDOWN_TURNS = 3

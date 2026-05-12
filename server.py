@@ -8,12 +8,16 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
+import chromadb
 from fastapi import FastAPI, HTTPException, Depends, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from config import API_HOST, API_PORT, API_KEY, DEFAULT_PROFILE
+from config import (
+    API_HOST, API_PORT, API_KEY, DEFAULT_PROFILE,
+    COLLECTION_SKILLS, get_chroma_path,
+)
 from pipeline import get_pipeline
 from query_engine import get_query_engine
 from constraint_engine import get_constraint_engine
@@ -222,8 +226,11 @@ async def query_dialogue(
         "active_constraints": [],
     }
 
-    if req.generate_constraint and search_results["results"]:
+    if req.generate_constraint:
         ce = get_constraint_engine(profile)
+
+        ce.load_skills_from_db()
+
         constraint = ce.generate_constraints(
             search_results=search_results,
             dialogue_context=req.context,
@@ -319,11 +326,9 @@ async def update_skill(
     _: str = Depends(verify_api_key),
     profile: str = Depends(get_profile),
 ):
-    import chromadb
-    from sentence_transformers import SentenceTransformer
-    from config import COLLECTION_SKILLS, MODEL_NAME, get_chroma_path
+    from embedding_client import get_embedding_client
 
-    model = SentenceTransformer(MODEL_NAME)
+    emb_client = get_embedding_client()
     client = chromadb.PersistentClient(path=get_chroma_path(profile))
     collection = client.get_collection(name=COLLECTION_SKILLS)
 
@@ -335,7 +340,7 @@ async def update_skill(
         )
 
     old_id = results["ids"][0]
-    new_emb = model.encode(req.new_content).tolist()
+    new_emb = emb_client.encode(req.new_content).tolist()
     collection.update(
         ids=[old_id],
         documents=[req.new_content],
@@ -374,11 +379,30 @@ async def get_current_constraints(
 ):
     """获取当前生效的剧情约束（供 UI 展示）"""
     ce = get_constraint_engine(profile)
+    ce.load_skills_from_db()
     return {
         "active_constraints": ce.get_active_constraints(),
-        "constraint_text": ce._last_constraint_text,
+        "constraint_text": ce.get_last_constraint_text(),
         "display_text": ce.get_display_text(),
+        "proficiency_display": ce.build_proficiency_display(),
         "count": len(ce.get_active_constraints()),
+        "skills_loaded": len(ce._all_skills),
+    }
+
+
+@app.post("/api/constraints/refresh")
+async def refresh_constraints(
+    _: str = Depends(verify_api_key),
+    profile: str = Depends(get_profile),
+):
+    """强制从数据库刷新技能数据并重新生成约束展示（修复管理界面显示问题）"""
+    ce = get_constraint_engine(profile)
+    ce.load_skills_from_db()
+    return {
+        "status": "ok",
+        "skills_loaded": len(ce._all_skills),
+        "display_text": ce.get_display_text(),
+        "proficiency_display": ce.build_proficiency_display(),
     }
 
 
