@@ -12,6 +12,7 @@ from config import (
     CONSTRAINT_COOLDOWN_TURNS, DEFAULT_PROFILE, COLLECTION_SKILLS,
     SKILL_PROFICIENCY_PATTERN,
 )
+from rag_rpg.common.utils import SingletonFactory
 
 
 class ConstraintEngine:
@@ -31,6 +32,7 @@ class ConstraintEngine:
         self._last_constraints: list[dict] = []
         self._last_constraint_text: str = ""
         self._all_skills: list[dict] = []
+        self.load_skills_from_db()
 
     def set_skills(self, skills: list[dict]):
         self._all_skills = list(skills)
@@ -313,12 +315,5 @@ COLLECTION_NAME_MAP = {
     "dialogue_memory": "dialogue",
 }
 
-_constraint_engine_instances: dict[str, ConstraintEngine] = {}
 
-
-def get_constraint_engine(profile: str = DEFAULT_PROFILE) -> ConstraintEngine:
-    if profile not in _constraint_engine_instances:
-        engine = ConstraintEngine(profile=profile)
-        engine.load_skills_from_db()
-        _constraint_engine_instances[profile] = engine
-    return _constraint_engine_instances[profile]
+get_constraint_engine = SingletonFactory(ConstraintEngine)

@@ -13,6 +13,7 @@ from typing import Optional, Callable
 from dataclasses import dataclass, field, asdict
 
 from config import BASE_DIR, get_checkpoint_dir, DEFAULT_PROFILE
+from rag_rpg.common.utils import SingletonFactory
 
 CHECKPOINT_DIR = BASE_DIR / ".checkpoints"
 MAX_HEARTBEAT_AGE = 30
@@ -337,10 +338,4 @@ class CheckpointManager:
                     f.unlink(missing_ok=True)
 
 
-_checkpoint_instances: dict[str, CheckpointManager] = {}
-
-
-def get_checkpoint(profile: str = DEFAULT_PROFILE) -> CheckpointManager:
-    if profile not in _checkpoint_instances:
-        _checkpoint_instances[profile] = CheckpointManager(profile)
-    return _checkpoint_instances[profile]
+get_checkpoint = SingletonFactory(CheckpointManager)

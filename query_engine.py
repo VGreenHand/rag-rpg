@@ -3,11 +3,8 @@
 v2.0: 超时保护 + 降级查询 + 部分失败容忍
 """
 import re
-import threading
 import logging
 from typing import Optional, Union
-
-import chromadb
 
 from config import (
     CHROMA_PATH, MODEL_NAME, COLLECTION_SKILLS,
@@ -15,8 +12,10 @@ from config import (
     MAX_CONTEXT_TURNS, TOP_K_RESULTS, MIN_RELEVANCE,
     get_chroma_path, DEFAULT_PROFILE,
 )
+from rag_rpg.infrastructure.chroma.client import ChromaClient
 from checkpoint_manager import TimeoutError as CkpTimeoutError
 from embedding_client import get_embedding_client
+from rag_rpg.common.utils import SafeTimer, SingletonFactory
 
 logger = logging.getLogger("rag-rpg.query")
 
@@ -25,49 +24,22 @@ ENCODE_TIMEOUT = 8.0
 COLLECTION_GET_TIMEOUT = 4.0
 
 
-class SafeTimer:
-    @staticmethod
-    def run(func, timeout: float, *args, **kwargs):
-        result_holder = []
-        exc_holder = []
-
-        def target():
-            try:
-                result_holder.append(func(*args, **kwargs))
-            except Exception as e:
-                exc_holder.append(e)
-
-        t = threading.Thread(target=target, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-        if t.is_alive():
-            raise CkpTimeoutError(f"操作超时 ({timeout}s)")
-        if exc_holder:
-            raise exc_holder[0]
-        return result_holder[0] if result_holder else None
-
-
 class QueryEngine:
     def __init__(self, profile: str = DEFAULT_PROFILE):
         self._profile = profile
         self.model = get_embedding_client()
-        self.client = chromadb.PersistentClient(path=get_chroma_path(profile))
-        self._collections: dict[str, object] = {}
+        self._chroma = ChromaClient(path=get_chroma_path(profile))
         self._stats: dict[str, int] = {"timeouts": 0, "degraded": 0, "errors": 0}
 
     def _get_collection(self, name: str):
-        if name not in self._collections:
-            try:
-                self._collections[name] = SafeTimer.run(
-                    lambda: self.client.get_or_create_collection(
-                        name=name, metadata={"hnsw:space": "cosine"}
-                    ),
-                    COLLECTION_GET_TIMEOUT,
-                )
-            except CkpTimeoutError:
-                self._stats["errors"] += 1
-                raise
-        return self._collections[name]
+        try:
+            return SafeTimer.run(
+                lambda: self._chroma.get_collection(name),
+                COLLECTION_GET_TIMEOUT,
+            )
+        except CkpTimeoutError:
+            self._stats["errors"] += 1
+            raise
 
     def build_queries(self, dialogue_context: list[dict]) -> list[str]:
         recent = dialogue_context[-MAX_CONTEXT_TURNS:]
@@ -246,15 +218,9 @@ class QueryEngine:
 
     def get_health(self) -> dict:
         return {
-            "collections_loaded": len(self._collections),
+            "collections_loaded": len(self._chroma._collections),
             "stats": dict(self._stats),
         }
 
 
-_query_engine_instances: dict[str, QueryEngine] = {}
-
-
-def get_query_engine(profile: str = DEFAULT_PROFILE) -> QueryEngine:
-    if profile not in _query_engine_instances:
-        _query_engine_instances[profile] = QueryEngine(profile)
-    return _query_engine_instances[profile]
+get_query_engine = SingletonFactory(QueryEngine)

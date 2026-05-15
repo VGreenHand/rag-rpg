@@ -11,8 +11,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
 
-import chromadb
-
 from config import (
     CHROMA_PATH, COLLECTION_DIALOGUE, COLLECTION_SKILLS,
     MODEL_NAME, DIALOGUE_DIR, BATCH_FILE, COLLECTION_MEMORY,
@@ -20,8 +18,10 @@ from config import (
     SKILL_PROFICIENCY_PATTERN,
     get_chroma_path, get_dialogue_dir, get_batch_file, DEFAULT_PROFILE,
 )
+from rag_rpg.infrastructure.chroma.client import ChromaClient
 from checkpoint_manager import get_checkpoint, TimeoutError as CkpTimeoutError
 from embedding_client import get_embedding_client
+from rag_rpg.common.utils import SafeTimer, SingletonFactory
 
 logger = logging.getLogger("rag-rpg.pipeline")
 
@@ -32,41 +32,11 @@ TERM_LOAD_LIMIT = 2000
 SUMMARY_MAX_CHARS = 800
 
 
-class SafeTimer:
-    @staticmethod
-    def run(func: Callable, timeout: float, *args, **kwargs):
-        result_holder = []
-        exc_holder = []
-
-        def target():
-            try:
-                result_holder.append(func(*args, **kwargs))
-            except Exception as e:
-                exc_holder.append(e)
-
-        t = threading.Thread(target=target, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-        if t.is_alive():
-            raise CkpTimeoutError(f"操作超时 ({timeout}s)")
-        if exc_holder:
-            raise exc_holder[0]
-        return result_holder[0] if result_holder else None
-
-
 class DialoguePipeline:
     def __init__(self, profile: str = DEFAULT_PROFILE):
         self._profile = profile
         self.model = get_embedding_client()
-        self.client = chromadb.PersistentClient(path=get_chroma_path(profile))
-        self.dialogue_col = self.client.get_or_create_collection(
-            name=COLLECTION_DIALOGUE,
-            metadata={"hnsw:space": "cosine"}
-        )
-        self.skill_col = self.client.get_or_create_collection(
-            name=COLLECTION_SKILLS,
-            metadata={"hnsw:space": "cosine"}
-        )
+        self._chroma = ChromaClient(path=get_chroma_path(profile))
         self._known_terms: Optional[list] = None
         self._terms_loading = False
         self._terms_lock = threading.Lock()
@@ -160,7 +130,7 @@ class DialoguePipeline:
                       threshold: float = DEDUP_SIMILARITY_THRESHOLD) -> bool:
         try:
             results = SafeTimer.run(
-                lambda: self.dialogue_col.query(
+                lambda: self._chroma.get_collection(COLLECTION_DIALOGUE).query(
                     query_embeddings=[text_embedding],
                     n_results=1
                 ),
@@ -206,12 +176,12 @@ class DialoguePipeline:
         terms = set()
         for col_name in (COLLECTION_SKILLS, COLLECTION_MEMORY):
             try:
-                col = self.client.get_collection(name=col_name)
+                col = self._chroma.client.get_collection(name=col_name)
                 count = col.count()
                 if count == 0 and col_name == COLLECTION_SKILLS and self._profile != DEFAULT_PROFILE:
                     try:
-                        fallback_client = chromadb.PersistentClient(path=get_chroma_path(DEFAULT_PROFILE))
-                        col = fallback_client.get_collection(name=col_name)
+                        fallback_chroma = ChromaClient(path=get_chroma_path(DEFAULT_PROFILE))
+                        col = fallback_chroma.client.get_collection(name=col_name)
                         count = col.count()
                     except Exception:
                         pass
@@ -267,8 +237,7 @@ class DialoguePipeline:
         return updates
 
     def _match_entry_key(self, key_terms: list[str]) -> Optional[str]:
-        """从 key_terms 中匹配 DB 中的技能 entry_key，支持不带间隔号的模糊匹配"""
-        col = self.skill_col
+        col = self._chroma.get_collection(COLLECTION_SKILLS)
         for term in key_terms:
             try:
                 results = col.get(where={"entry_key": term})
@@ -290,8 +259,8 @@ class DialoguePipeline:
                 continue
         if self._profile != DEFAULT_PROFILE:
             try:
-                fallback_client = chromadb.PersistentClient(path=get_chroma_path(DEFAULT_PROFILE))
-                fallback_col = fallback_client.get_collection(name=COLLECTION_SKILLS)
+                fallback_chroma = ChromaClient(path=get_chroma_path(DEFAULT_PROFILE))
+                fallback_col = fallback_chroma.client.get_collection(name=COLLECTION_SKILLS)
                 for term in key_terms:
                     try:
                         results = fallback_col.get(where={"entry_key": term})
@@ -315,12 +284,11 @@ class DialoguePipeline:
 
     def _update_skill_proficiency(self, entry_key: str,
                                   proficiency: int) -> bool:
-        """更新技能熟练度。如果当前 profile 无对应条目，回退到 default profile。"""
-        for col, label in [(self.skill_col, self._profile), (None, "default")]:
+        for col, label in [(self._chroma.get_collection(COLLECTION_SKILLS), self._profile), (None, "default")]:
             try:
                 if col is None and self._profile != DEFAULT_PROFILE:
-                    fallback = chromadb.PersistentClient(path=get_chroma_path(DEFAULT_PROFILE))
-                    col = fallback.get_collection(name=COLLECTION_SKILLS)
+                    fallback_chroma = ChromaClient(path=get_chroma_path(DEFAULT_PROFILE))
+                    col = fallback_chroma.client.get_collection(name=COLLECTION_SKILLS)
                 elif col is None:
                     break
                 results = col.get(where={"entry_key": entry_key})
@@ -435,7 +403,7 @@ class DialoguePipeline:
         doc_id = str(uuid.uuid4())
 
         def _add():
-            self.dialogue_col.add(
+            self._chroma.get_collection(COLLECTION_DIALOGUE).add(
                 embeddings=[embedding],
                 documents=[clean_text],
                 metadatas=[{
@@ -596,7 +564,7 @@ class DialoguePipeline:
             ]
 
             def _add_batch():
-                collection = self.client.get_or_create_collection(
+                collection = self._chroma.client.get_or_create_collection(
                     name=COLLECTION_MEMORY
                 )
                 collection.add(
@@ -631,7 +599,7 @@ class DialoguePipeline:
             except Exception:
                 pass
 
-        collection = self.client.get_or_create_collection(name=COLLECTION_MEMORY)
+        collection = self._chroma.client.get_or_create_collection(name=COLLECTION_MEMORY)
         return {
             "status": status,
             "ingested": succeeded,
@@ -646,7 +614,7 @@ class DialoguePipeline:
         stats = {}
         for col_name in [COLLECTION_DIALOGUE, COLLECTION_SKILLS, COLLECTION_MEMORY]:
             try:
-                col = self.client.get_collection(name=col_name)
+                col = self._chroma.client.get_collection(name=col_name)
                 stats[col_name] = col.count()
             except Exception:
                 stats[col_name] = 0
@@ -658,10 +626,4 @@ class DialoguePipeline:
         return stats
 
 
-_pipeline_instances: dict[str, DialoguePipeline] = {}
-
-
-def get_pipeline(profile: str = DEFAULT_PROFILE) -> DialoguePipeline:
-    if profile not in _pipeline_instances:
-        _pipeline_instances[profile] = DialoguePipeline(profile)
-    return _pipeline_instances[profile]
+get_pipeline = SingletonFactory(DialoguePipeline)
